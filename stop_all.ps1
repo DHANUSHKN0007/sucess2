@@ -1,9 +1,11 @@
-# MIT Mysore EMS - Unified System Stopper
+# MIT Mysore EMS - Unified System Stopper (Development)
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
-Write-Host "Stopping all MIT Mysore EMS services..." -ForegroundColor Yellow
+Write-Host "Stopping all MIT Mysore EMS development services..." -ForegroundColor Yellow
 
-$ports = @(8080, 3000, 3001, 3002)
+# Terminate only development ports: 8081 (Central), 8082 (Lab Server), 3000 (Admin), 3001 (COE), 3002 (Student)
+# Port 8080 belongs to the production environment and is strictly excluded from termination
+$ports = @(8081, 8082, 3000, 3001, 3002)
 foreach ($p in $ports) {
     $conns = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
     foreach ($c in $conns) {
@@ -14,4 +16,4 @@ foreach ($p in $ports) {
     }
 }
 
-Write-Host "All portal and backend ports (8080, 3000, 3001, 3002) are now free." -ForegroundColor Green
+Write-Host "All local development ports (8081, 8082, 3000, 3001, 3002) are now free." -ForegroundColor Green
