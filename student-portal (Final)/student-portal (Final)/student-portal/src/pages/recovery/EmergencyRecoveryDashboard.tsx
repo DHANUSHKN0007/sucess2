@@ -60,7 +60,7 @@ export const EmergencyRecoveryDashboard: React.FC<EmergencyRecoveryDashboardProp
       if (onClose) {
         onClose();
       } else {
-        navigate('/student/login', { replace: true });
+        navigate('/instructor/login', { replace: true });
       }
     }
   }, [navigate, onClose]);
@@ -160,7 +160,7 @@ export const EmergencyRecoveryDashboard: React.FC<EmergencyRecoveryDashboardProp
     if (onClose) {
       onClose();
     } else {
-      navigate('/student/login', { replace: true });
+      navigate('/instructor/login', { replace: true });
     }
   };
 

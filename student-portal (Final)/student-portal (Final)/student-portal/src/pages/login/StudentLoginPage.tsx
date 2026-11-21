@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { InstitutionHeader } from '../../components/layout/InstitutionHeader';
 import { DualModeDobInput } from '../../components/common/DualModeDobInput';
@@ -11,7 +11,6 @@ import {
 import { API_MODE, LAB_API_BASE_URL } from '../../services/apiConfig';
 import {
   emergencyRecoveryService,
-  FIXED_RECOVERY_CREDENTIALS,
 } from '../../services/emergencyRecoveryService';
 import { EmergencyRecoveryDashboard } from '../recovery/EmergencyRecoveryDashboard';
 import {
@@ -74,11 +73,7 @@ export const StudentLoginPage: React.FC = () => {
 
     // Request Fullscreen Mode immediately upon student login attempt
     if (typeof document !== 'undefined' && !document.fullscreenElement && document.documentElement?.requestFullscreen) {
-      try {
-        await document.documentElement.requestFullscreen();
-      } catch {
-        // Ignore if user settings disable fullscreen
-      }
+      document.documentElement.requestFullscreen().catch(() => {});
     }
 
     const trimmedUsn = usn.trim();
@@ -105,11 +100,7 @@ export const StudentLoginPage: React.FC = () => {
           !document.fullscreenElement &&
           document.documentElement?.requestFullscreen
         ) {
-          try {
-            await document.documentElement.requestFullscreen();
-          } catch {
-            // Ignore if user settings disable fullscreen
-          }
+          document.documentElement.requestFullscreen().catch(() => {});
         }
 
         // Open the In-Console Recovery Manager directly in the terminal
@@ -345,7 +336,15 @@ export const StudentLoginPage: React.FC = () => {
           <span>
             Maharaja Institute of Technology Mysore · Student Examination Portal
           </span>
-          <span>Offline LAN Mode · Protected Environment</span>
+          <div className="flex items-center gap-4">
+            <Link
+              to="/instructor/login"
+              className="text-[#64748B] hover:text-[#2463B5] transition-colors underline-offset-2 hover:underline"
+            >
+              Invigilator / Recovery Login
+            </Link>
+            <span>Offline LAN Mode · Protected Environment</span>
+          </div>
         </div>
       </footer>
 
