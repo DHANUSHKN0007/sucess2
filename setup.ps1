@@ -25,30 +25,28 @@ Write-Host "====================================================================
 Write-Host "`n[1/6] Checking system prerequisites..." -ForegroundColor Yellow
 
 # Java check
-try {
-    $javaVerOutput = java -version 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { throw "Java execution failed" }
-    Write-Host "  [OK] Java detected:" ($javaVerOutput.Split("`n")[0].Trim()) -ForegroundColor Green
-} catch {
+if (Get-Command java -ErrorAction SilentlyContinue) {
+    Write-Host "  [OK] Java detected in PATH." -ForegroundColor Green
+} else {
     Write-Host "  [ERROR] Java JDK 17+ is required but not found in PATH." -ForegroundColor Red
     Write-Host "  Please install OpenJDK 17 or Eclipse Temurin 17 and add to PATH." -ForegroundColor Red
     exit 1
 }
 
 # Node.js check
-try {
+if (Get-Command node -ErrorAction SilentlyContinue) {
     $nodeVer = node -v
     Write-Host "  [OK] Node.js detected: $nodeVer" -ForegroundColor Green
-} catch {
+} else {
     Write-Host "  [ERROR] Node.js 18+ is required but not found in PATH." -ForegroundColor Red
     exit 1
 }
 
 # npm check
-try {
+if (Get-Command npm -ErrorAction SilentlyContinue) {
     $npmVer = npm -v
     Write-Host "  [OK] npm detected: $npmVer" -ForegroundColor Green
-} catch {
+} else {
     Write-Host "  [ERROR] npm is required but not found in PATH." -ForegroundColor Red
     exit 1
 }
@@ -120,13 +118,13 @@ if ($SkipNpm) {
         Push-Location $portalDir
         try {
             if (Test-Path "package-lock.json") {
-                npm ci --no-audit --prefer-offline
+                npm ci --legacy-peer-deps --no-audit --prefer-offline
             } else {
-                npm install --no-audit
+                npm install --legacy-peer-deps --no-audit
             }
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [WARN] npm ci returned non-zero, falling back to npm install..." -ForegroundColor DarkYellow
-                npm install --no-audit
+                npm install --legacy-peer-deps --no-audit
             }
         } finally {
             Pop-Location

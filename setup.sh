@@ -48,7 +48,7 @@ echo ""
 echo "[4/6] Installing frontend dependencies..."
 for dir in "admin-portal (7)" "coe-portal (7)" "student-portal (Final)/student-portal (Final)/student-portal"; do
     echo "  Installing in $dir..."
-    (cd "$SCRIPT_DIR/$dir" && (npm ci --no-audit --prefer-offline 2>/dev/null || npm install --no-audit))
+    (cd "$SCRIPT_DIR/$dir" && (npm ci --legacy-peer-deps --no-audit --prefer-offline 2>/dev/null || npm install --legacy-peer-deps --no-audit))
 done
 echo "  [OK] Frontend dependencies installed."
 
