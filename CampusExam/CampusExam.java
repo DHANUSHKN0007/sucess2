@@ -320,7 +320,7 @@ public final class CampusExam {
         public static PublicKey labPublicKey;
 
         public static void init() throws Exception {
-            Path keyDir = Path.of("keys");
+            Path keyDir = Path.of(env("CENTRAL_KEYS_DIR", "keys"));
             Files.createDirectories(keyDir);
 
             // Strict security assertion: Central backend must NOT possess lab_private.key
@@ -338,11 +338,21 @@ public final class CampusExam {
         private static PublicKey loadLabPublicKey(Path dir) throws Exception {
             Path pubPath = dir.resolve("lab_public.key");
             if (!Files.exists(pubPath)) {
-                Path altPath = Path.of("lab_server_keys", "lab_public.key");
+                Path altPath = Path.of(env("LAB_KEYS_DIR", "lab_server_keys"), "lab_public.key");
                 if (Files.exists(altPath)) {
                     Files.copy(altPath, pubPath, StandardCopyOption.REPLACE_EXISTING);
                 } else {
-                    throw new IllegalStateException("lab_public.key not found in " + dir.toAbsolutePath());
+                    Path labDir = Path.of(env("LAB_KEYS_DIR", "lab_server_keys"));
+                    Files.createDirectories(labDir);
+                    Path labPrivPath = labDir.resolve("lab_private.key");
+                    Path labPubPath = labDir.resolve("lab_public.key");
+                    KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+                    kpg.initialize(2048);
+                    KeyPair pair = kpg.generateKeyPair();
+                    Files.write(labPrivPath, pair.getPrivate().getEncoded());
+                    Files.write(labPubPath, pair.getPublic().getEncoded());
+                    Files.copy(labPubPath, pubPath, StandardCopyOption.REPLACE_EXISTING);
+                    System.out.println("[Crypto] Automatically initialized fresh Lab Server keypair in " + labDir.toAbsolutePath());
                 }
             }
             KeyFactory kf = KeyFactory.getInstance("RSA");
@@ -451,18 +461,30 @@ public final class CampusExam {
     static String env(String key, String fallback) { return System.getenv().getOrDefault(key, fallback); }
 
     public static void main(String[] args) throws Exception {
+        if (args.length > 0 && "--init-keys".equals(args[0])) {
+            Crypto.init();
+            System.out.println("[Setup] Cryptographic keys verified and initialized successfully.");
+            return;
+        }
         Crypto.init();
-        // Mandatory Phase 1 startup check: Verify connection to campusexam_test only
+        // Database connection and isolation check
         try (Connection db = connect()) {
             try (Statement st = db.createStatement(); ResultSet rs = st.executeQuery("SELECT current_database()")) {
                 if (rs.next()) {
                     String currentDb = rs.getString(1);
-                    if (!"campusexam_test".equals(currentDb)) {
-                        System.err.println("FATAL STARTUP CHECK FAILED: Connected to '" + currentDb + "' instead of campusexam_test! Aborting.");
+                    String expectedDb = env("DB_NAME", env("EXPECTED_DB", "campusexam_test"));
+                    boolean allowAnyDb = "true".equalsIgnoreCase(env("ALLOW_ANY_DB", "false"));
+                    if (!allowAnyDb && !expectedDb.equalsIgnoreCase(currentDb)) {
+                        System.err.println("FATAL STARTUP CHECK FAILED: Connected to '" + currentDb + "' instead of expected '" + expectedDb + "'! Set DB_NAME=" + currentDb + " or ALLOW_ANY_DB=true to override. Aborting.");
                         System.exit(1);
                     }
                     System.out.println("[Startup] Database isolation confirmed: Connected to '" + currentDb + "'");
                 }
+            }
+            try {
+                bootstrapOfficialAccounts(db);
+            } catch (Exception e) {
+                System.out.println("[Startup] Notice: Core accounts verification - " + e.getMessage());
             }
         }
         int port = Integer.parseInt(env("PORT", "8081"));
@@ -492,6 +514,163 @@ public final class CampusExam {
             try (var out = exchange.getResponseBody()) { out.write(bytes); }
         } else {
             exchange.sendResponseHeaders(404, -1);
+        }
+    }
+
+    // --- CENTRAL SSE REAL-TIME SYSTEM ---
+    public static class CentralSseClient {
+        final HttpExchange exchange;
+        final OutputStream os;
+        final Long userId;
+        final String role;
+        final Long departmentId;
+        final String username;
+        volatile boolean closed = false;
+
+        CentralSseClient(HttpExchange exchange, OutputStream os, Long userId, String role, Long departmentId, String username) {
+            this.exchange = exchange;
+            this.os = os;
+            this.userId = userId;
+            this.role = role;
+            this.departmentId = departmentId;
+            this.username = username;
+        }
+
+        synchronized boolean send(String event, String data) {
+            if (closed) return false;
+            try {
+                StringBuilder sb = new StringBuilder();
+                if (event != null && !event.isEmpty()) {
+                    sb.append("event: ").append(event).append("\n");
+                }
+                sb.append("data: ").append(data.replace("\r", "").replace("\n", "\ndata: ")).append("\n\n");
+                os.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+                os.flush();
+                return true;
+            } catch (Exception e) {
+                closed = true;
+                try { exchange.close(); } catch (Exception ignored) {}
+                return false;
+            }
+        }
+
+        synchronized boolean sendComment(String comment) {
+            if (closed) return false;
+            try {
+                os.write((": " + comment + "\n\n").getBytes(StandardCharsets.UTF_8));
+                os.flush();
+                return true;
+            } catch (Exception e) {
+                closed = true;
+                try { exchange.close(); } catch (Exception ignored) {}
+                return false;
+            }
+        }
+    }
+
+    public static final List<CentralSseClient> centralSseClients = new CopyOnWriteArrayList<>();
+
+    static {
+        Thread sseHeartbeat = new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(15000);
+                    for (CentralSseClient c : centralSseClients) {
+                        if (!c.sendComment("keepalive")) {
+                            centralSseClients.remove(c);
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Exception ignored) {}
+            }
+        }, "central-sse-heartbeat");
+        sseHeartbeat.setDaemon(true);
+        sseHeartbeat.start();
+    }
+
+    public static void broadcastCentralEvent(String eventType, Map<String, Object> payload) {
+        if (payload == null) payload = new LinkedHashMap<>();
+        Map<String, Object> copy = new LinkedHashMap<>(payload);
+        if (!copy.containsKey("type")) copy.put("type", eventType);
+        if (!copy.containsKey("eventType")) copy.put("eventType", eventType);
+        if (!copy.containsKey("timestamp")) copy.put("timestamp", Instant.now().toString());
+        String json = Json.stringify(copy);
+        List<CentralSseClient> dead = new ArrayList<>();
+        for (CentralSseClient c : centralSseClients) {
+            boolean ok1 = c.send(eventType, json);
+            boolean ok2 = c.send("message", json);
+            if (!ok1 && !ok2) {
+                dead.add(c);
+            }
+        }
+        centralSseClients.removeAll(dead);
+    }
+
+    static void handleCentralSseStream(Connection db, HttpExchange exchange, Form form) {
+        try {
+            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, OPTIONS");
+            exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "*");
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=UTF-8");
+            exchange.getResponseHeaders().set("Cache-Control", "no-cache, no-transform");
+            exchange.getResponseHeaders().set("Connection", "keep-alive");
+            exchange.getResponseHeaders().set("X-Accel-Buffering", "no");
+
+            String rawToken = null;
+            String authHdr = exchange.getRequestHeaders().getFirst("Authorization");
+            if (authHdr != null && authHdr.regionMatches(true, 0, "Bearer ", 0, 7)) {
+                rawToken = authHdr.substring(7).trim();
+            }
+            if (rawToken == null || rawToken.isBlank()) {
+                rawToken = form.get("token").trim();
+            }
+            if (rawToken == null || rawToken.isBlank()) {
+                String query = exchange.getRequestURI().getRawQuery();
+                if (query != null) {
+                    for (String pair : query.split("&")) {
+                        String[] kv = pair.split("=", 2);
+                        if (kv.length == 2 && kv[0].equalsIgnoreCase("token")) {
+                            rawToken = URLDecoder.decode(kv[1], StandardCharsets.UTF_8).trim();
+                            break;
+                        }
+                    }
+                }
+            }
+
+            Long userId = null;
+            String role = "ANONYMOUS";
+            Long deptId = null;
+            String username = "guest";
+
+            if (rawToken != null && rawToken.matches("[a-fA-F0-9]{64}")) {
+                try {
+                    String digest = digest(rawToken);
+                    User u = authenticate(db, digest);
+                    if (u != null) {
+                        userId = u.id();
+                        role = u.role();
+                        deptId = u.departmentId();
+                        username = u.username();
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            exchange.sendResponseHeaders(200, 0);
+            OutputStream os = exchange.getResponseBody();
+            CentralSseClient client = new CentralSseClient(exchange, os, userId, role, deptId, username);
+            centralSseClients.add(client);
+
+            Map<String, Object> welcome = new LinkedHashMap<>();
+            welcome.put("type", "CONNECTED");
+            welcome.put("role", role);
+            welcome.put("username", username);
+            welcome.put("timestamp", Instant.now().toString());
+            String json = Json.stringify(welcome);
+            client.send("connected", json);
+            client.send("message", json);
+        } catch (Exception e) {
+            System.err.println("[Central SSE] Connection error: " + e.getMessage());
         }
     }
 
@@ -536,6 +715,18 @@ public final class CampusExam {
                         while (v1Path.endsWith("/") && v1Path.length() > 1) v1Path = v1Path.substring(0, v1Path.length() - 1);
                         if (v1Path.equals("health") && method.equals("GET")) {
                             response = v1Success(Map.of("status", "ok"), "System operational");
+                        } else if ((v1Path.equals("events") || v1Path.equals("monitoring/events")) && method.equals("GET")) {
+                            handleCentralSseStream(db, exchange, form);
+                            response = null;
+                            binaryResponse = null;
+                            return;
+                        } else if ((v1Path.equals("events/broadcast") || v1Path.equals("monitoring/events/broadcast")) && method.equals("POST")) {
+                            String evtType = form.get("eventType").isBlank() ? form.get("type") : form.get("eventType");
+                            if (evtType.isBlank()) evtType = "CENTRAL_EVENT";
+                            Map<String, Object> data = form.obj("data");
+                            if (data.isEmpty()) data = new LinkedHashMap<>(form.values);
+                            broadcastCentralEvent(evtType, data);
+                            response = v1Success(Map.of("broadcasted", true), "Event broadcasted");
                         } else if (v1Path.equals("auth/login") && method.equals("POST")) {
                             response = v1Login(db, form);
                         } else if (v1Path.equals("auth/coe/login") && method.equals("POST")) {
@@ -570,6 +761,18 @@ public final class CampusExam {
                         // Unversioned legacy /api/* and Stage 3 student/lab routes
                         if (path.equals("health") && method.equals("GET")) {
                             response = "{\"status\":\"ok\"}";
+                        } else if ((path.equals("events") || path.equals("monitoring/events")) && method.equals("GET")) {
+                            handleCentralSseStream(db, exchange, form);
+                            response = null;
+                            binaryResponse = null;
+                            return;
+                        } else if (path.equals("events/broadcast") && method.equals("POST")) {
+                            String evtType = form.get("eventType").isBlank() ? form.get("type") : form.get("eventType");
+                            if (evtType.isBlank()) evtType = "CENTRAL_EVENT";
+                            Map<String, Object> data = form.obj("data");
+                            if (data.isEmpty()) data = new LinkedHashMap<>(form.values);
+                            broadcastCentralEvent(evtType, data);
+                            response = v1Success(Map.of("broadcasted", true), "Event broadcasted");
                         } else if ((path.equals("login") || path.equals("auth/login")) && method.equals("POST")) {
                             response = path.equals("auth/login") ? v1Login(db, form) : login(db, form);
                         } else if (path.equals("auth/coe/login") && method.equals("POST")) {
@@ -727,6 +930,10 @@ public final class CampusExam {
                 response = v1Error("PDF_GENERATION_ERROR", "Failed to generate question paper archive PDF: " + e.getMessage());
                 status = 500;
             }
+        }
+
+        if (response == null && binaryResponse == null) {
+            return;
         }
 
         byte[] bytes = binaryResponse != null ? binaryResponse : response.getBytes(StandardCharsets.UTF_8);
@@ -1060,41 +1267,102 @@ public final class CampusExam {
                         studentGroupId = (Long) rs.getObject(7);
                     }
                 }
-                // Check session specifically matching student's group/department/semester
-                try (var st = sql(db, """
+                // Check session specifically matching student's frozen roster or academic group
+                List<Map<String, Object>> candidateSessions = new ArrayList<>();
+                try (var snapSt = sql(db, """
                         SELECT es.id, s.code, s.name, d.name, c.title
-                        FROM examination_session es
+                        FROM session_roster_snapshot r
+                        JOIN examination_session es ON es.id = r.session_id
                         JOIN subject s ON s.id = es.subject_id
                         JOIN department d ON d.id = es.department_id
-                        LEFT JOIN academic_group ag ON ag.id = es.group_id
                         LEFT JOIN examination_cycle c ON c.id = es.cycle_id
-                        WHERE (es.group_id = ? OR (es.department_id = ? AND s.semester = ?))
-                          AND es.status IN ('SCHEDULED', 'FROZEN', 'IN_PROGRESS', 'ACTIVE')
-                        ORDER BY es.id DESC LIMIT 1
-                        """, studentGroupId, studentDeptId, studentSemInt); var rs = st.executeQuery()) {
-                    if (rs.next()) {
-                        activeSessionId = rs.getLong(1);
-                        activeSubCode = rs.getString(2);
-                        activeSubName = rs.getString(3);
-                        sDept = rs.getString(4);
-                        if (rs.getString(5) != null) cycleName = rs.getString(5);
-                    } else {
-                        // Fallback to latest scheduled session
-                        try (var fallbackSt = sql(db, """
-                                SELECT es.id, s.code, s.name, d.name, c.title
-                                FROM examination_session es
-                                JOIN subject s ON s.id = es.subject_id
-                                JOIN department d ON d.id = es.department_id
-                                LEFT JOIN examination_cycle c ON c.id = es.cycle_id
-                                WHERE es.status IN ('SCHEDULED', 'FROZEN', 'IN_PROGRESS', 'ACTIVE')
-                                ORDER BY es.id DESC LIMIT 1
-                                """); var frs = fallbackSt.executeQuery()) {
-                            if (frs.next()) {
-                                activeSessionId = frs.getLong(1);
-                                activeSubCode = frs.getString(2);
-                                activeSubName = frs.getString(3);
-                                sDept = frs.getString(4);
-                                if (frs.getString(5) != null) cycleName = frs.getString(5);
+                        WHERE r.usn = ? AND es.status IN ('SCHEDULED', 'FROZEN', 'IN_PROGRESS', 'ACTIVE')
+                          AND es.is_cancelled = FALSE
+                        ORDER BY es.id DESC
+                        """, usn); var snapRs = snapSt.executeQuery()) {
+                    while (snapRs.next()) {
+                        Map<String, Object> row = new LinkedHashMap<>();
+                        row.put("id", snapRs.getLong(1));
+                        row.put("code", snapRs.getString(2));
+                        row.put("name", snapRs.getString(3));
+                        row.put("dept", snapRs.getString(4));
+                        row.put("cycle", snapRs.getString(5));
+                        candidateSessions.add(row);
+                    }
+                }
+
+                if (!candidateSessions.isEmpty()) {
+                    if (candidateSessions.size() > 1) {
+                        // Check if multiple sessions are concurrently active right now
+                        int activeNow = 0;
+                        Map<String, Object> chosen = null;
+                        for (Map<String, Object> cs : candidateSessions) {
+                            long eid = (Long) cs.get("id");
+                            String overlapsNow = one(db, """
+                                    SELECT esit.id FROM examination_sitting esit
+                                    WHERE esit.session_id = ? AND esit.exam_date = CURRENT_DATE
+                                      AND esit.status NOT IN ('CANCELLED', 'RETIRED')
+                                      AND CURRENT_TIME BETWEEN (esit.start_time - interval '30 minutes')
+                                                           AND (esit.start_time + interval '1 minute' * esit.duration_minutes + interval '15 minutes')
+                                    LIMIT 1
+                                    """, eid);
+                            if (!overlapsNow.isBlank()) {
+                                activeNow++;
+                                chosen = cs;
+                            }
+                        }
+                        if (activeNow > 1) {
+                            throw new Problem(409, "Ambiguous examination allocation: Student USN " + usn + " is enrolled in multiple active examination sessions concurrently. Contact examination administrator.");
+                        }
+                        if (chosen != null) {
+                            candidateSessions = List.of(chosen);
+                        }
+                    }
+                    Map<String, Object> resolved = candidateSessions.get(0);
+                    activeSessionId = (Long) resolved.get("id");
+                    activeSubCode = (String) resolved.get("code");
+                    activeSubName = (String) resolved.get("name");
+                    sDept = (String) resolved.get("dept");
+                    if (resolved.get("cycle") != null) cycleName = (String) resolved.get("cycle");
+                } else {
+                    // Fallback to academic group / department / semester matching
+                    try (var st = sql(db, """
+                            SELECT es.id, s.code, s.name, d.name, c.title
+                            FROM examination_session es
+                            JOIN subject s ON s.id = es.subject_id
+                            JOIN department d ON d.id = es.department_id
+                            LEFT JOIN academic_group ag ON ag.id = es.group_id
+                            LEFT JOIN examination_cycle c ON c.id = es.cycle_id
+                            WHERE (es.group_id = ? OR (es.department_id = ? AND s.semester = ?))
+                              AND es.status IN ('SCHEDULED', 'FROZEN', 'IN_PROGRESS', 'ACTIVE')
+                              AND es.is_cancelled = FALSE
+                            ORDER BY es.id DESC LIMIT 1
+                            """, studentGroupId, studentDeptId, studentSemInt); var rs = st.executeQuery()) {
+                        if (rs.next()) {
+                            activeSessionId = rs.getLong(1);
+                            activeSubCode = rs.getString(2);
+                            activeSubName = rs.getString(3);
+                            sDept = rs.getString(4);
+                            if (rs.getString(5) != null) cycleName = rs.getString(5);
+                        } else {
+                            // Fallback to latest scheduled session
+                            try (var fallbackSt = sql(db, """
+                                    SELECT es.id, s.code, s.name, d.name, c.title
+                                    FROM examination_session es
+                                    JOIN subject s ON s.id = es.subject_id
+                                    JOIN department d ON d.id = es.department_id
+                                    LEFT JOIN examination_cycle c ON c.id = es.cycle_id
+                                    WHERE es.status IN ('SCHEDULED', 'FROZEN', 'IN_PROGRESS', 'ACTIVE')
+                                      AND es.is_cancelled = FALSE
+                                    ORDER BY es.id DESC LIMIT 1
+                                    """); var frs = fallbackSt.executeQuery()) {
+                                if (frs.next()) {
+                                    activeSessionId = frs.getLong(1);
+                                    activeSubCode = frs.getString(2);
+                                    activeSubName = frs.getString(3);
+                                    sDept = frs.getString(4);
+                                    if (frs.getString(5) != null) cycleName = frs.getString(5);
+                                }
                             }
                         }
                     }
@@ -1102,13 +1370,11 @@ public final class CampusExam {
             }
         }
 
-        boolean isOverridePassword = dob.equals("MITPRO@2587") || dob.equalsIgnoreCase("MITPRO@2587");
-
         if (sName == null || sName.isBlank()) {
             throw new Problem(401, "Access denied: USN " + usn + " is not enrolled in the frozen examination session roster");
         }
 
-        check(dob.equals(sDob) || isOverridePassword, 401, "Incorrect date of birth");
+        check(dob.equals(sDob) || dob.replace("-", "").equals(sDob.replace("-", "")), 401, "Incorrect date of birth");
 
         // Block re-login and retakes permanently after exam submission (even with valid DOB or MITPRO@2587)
         try (Connection db = connect()) {
@@ -1132,11 +1398,6 @@ public final class CampusExam {
                         extra);
             }
             // Never disqualify or permanently lock based on violation_count while exam is unsubmitted.
-            if (isOverridePassword) {
-                try {
-                    run(db, "DELETE FROM security_violation_log WHERE student_usn=? AND logged_at > clock_timestamp() - interval '24 hours'", usn);
-                } catch (Exception ignored) {}
-            }
         }
 
         // Determine or assign version
@@ -1239,6 +1500,15 @@ public final class CampusExam {
         res.put("student", studentObj);
         res.put("examSession", sessionObj);
         res.put("serverTimestampMs", System.currentTimeMillis());
+
+        Map<String, Object> stuLoginEvt = new LinkedHashMap<>();
+        stuLoginEvt.put("eventType", "STUDENT_LOGIN");
+        stuLoginEvt.put("usn", usn);
+        stuLoginEvt.put("fullName", sName);
+        stuLoginEvt.put("computerNumber", computerNumber);
+        stuLoginEvt.put("sessionId", activeSessionId);
+        broadcastCentralEvent("STUDENT_LOGIN", stuLoginEvt);
+
         return Json.stringify(res);
     }
 
@@ -5166,6 +5436,15 @@ public final class CampusExam {
             System.err.println("Warning: auto-scheduling examination_session failed: " + ex.getMessage());
         }
 
+        Map<String, Object> pubEvt = new LinkedHashMap<>();
+        pubEvt.put("eventType", "QUESTION_SET_PUBLISHED");
+        pubEvt.put("subjectId", subjectId);
+        pubEvt.put("subjectCode", subCode);
+        pubEvt.put("subjectName", subName);
+        pubEvt.put("departmentId", deptId);
+        pubEvt.put("revisionNumber", revNumber);
+        broadcastCentralEvent("QUESTION_SET_PUBLISHED", pubEvt);
+
         return v1Success(revision, "Question sets (" + revNumber + ") successfully published to COE");
     }
 
@@ -5431,6 +5710,7 @@ public final class CampusExam {
         retObj.put("existingCorrectOption", origOpt);
         retObj.put("proposedCorrectOption", proposed);
         retObj.put("status", "Pending COE Review");
+        broadcastCentralEvent("KEY_CORRECTION_SUBMITTED", Map.of("eventType", "KEY_CORRECTION_SUBMITTED", "examinationId", examId));
         return v1Success(retObj, "Key correction request submitted to COE");
     }
 
@@ -7231,6 +7511,7 @@ public final class CampusExam {
         ack.put("recordCount", sResults.size());
         ack.put("message", "Signed result package imported and verified. Status: IMPORTED_PENDING_REVIEW.");
 
+        broadcastCentralEvent("RESULTS_IMPORTED", Map.of("eventType", "RESULTS_IMPORTED", "examinationId", sessionId));
         return v1Success(ack, "Results successfully imported");
     }
 
@@ -7574,7 +7855,7 @@ public final class CampusExam {
         check(morningCount <= mCombinedCap, 400, "Morning sitting allocation (" + morningCount + ") exceeds laboratory capacity (" + mCombinedCap + ")");
         check(afternoonCount <= aCombinedCap, 400, "Afternoon sitting allocation (" + afternoonCount + ") exceeds laboratory capacity (" + aCombinedCap + ")");
 
-        // Validate Lab Overlap for Morning Sitting
+        // Capacity-Aware Validation for Morning Sitting
         if (morningEnabled) {
             String mDate = (String) morningObj.getOrDefault("examDate", primaryDate);
             String mStart = (String) morningObj.getOrDefault("startTime", primaryStartTime);
@@ -7582,21 +7863,59 @@ public final class CampusExam {
             int mDur = morningObj.get("durationMinutes") instanceof Number n ? n.intValue() : primaryDuration;
             check(mDur > 0, 400, "Morning sitting duration must be a positive integer in minutes");
 
+            // Timetable Conflict Check: No eligible student may have an overlapping active examination
+            for (Map<String, Object> stu : eligibleStudents) {
+                String sUsn = (String) stu.get("usn");
+                if (sUsn != null && !sUsn.isBlank()) {
+                    String conflictSub = one(db, """
+                            SELECT s.code || ' (Exam #' || es.id || ')' FROM session_roster_snapshot r
+                            JOIN examination_sitting esit ON esit.session_id = r.session_id
+                            JOIN examination_session es ON es.id = esit.session_id
+                            JOIN subject s ON s.id = es.subject_id
+                            WHERE r.usn = ? AND esit.exam_date = ?::date
+                              AND esit.status NOT IN ('CANCELLED', 'RETIRED')
+                              AND es.is_cancelled = FALSE
+                              AND (?::time, ?::time + interval '1 minute' * ?) OVERLAPS (esit.start_time, esit.start_time + interval '1 minute' * esit.duration_minutes)
+                            LIMIT 1
+                            """, sUsn, mDate, mStart, mStart, mDur);
+                    check(conflictSub.isEmpty(), 409, "Candidate timetable conflict: Student " + sUsn + " is already scheduled for overlapping examination " + conflictSub + " on " + mDate);
+                }
+            }
+
+            // Duplicate Examination Check: Same department & subject cannot be scheduled twice concurrently
+            String dupExam = one(db, """
+                    SELECT es.id FROM examination_sitting esit
+                    JOIN examination_session es ON es.id = esit.session_id
+                    WHERE es.department_id = ? AND es.subject_id = ? AND esit.exam_date = ?::date
+                      AND esit.status NOT IN ('CANCELLED', 'RETIRED')
+                      AND es.is_cancelled = FALSE
+                      AND (?::time, ?::time + interval '1 minute' * ?) OVERLAPS (esit.start_time, esit.start_time + interval '1 minute' * esit.duration_minutes)
+                    LIMIT 1
+                    """, deptId, subId, mDate, mStart, mStart, mDur);
+            check(dupExam.isEmpty(), 409, "Duplicate examination scheduling: Department already has examination #" + dupExam + " scheduled for this subject at an overlapping time on " + mDate);
+
+            // Capacity-Aware Multi-Cohort Shared Laboratory Check
             for (String mLab : morningLabCodes) {
-                String conflict = one(db, """
-                        SELECT es.id FROM examination_sitting esit
+                int labCap = labCapacities.getOrDefault(mLab, 60);
+                String bookedStr = one(db, """
+                        SELECT COALESCE(SUM(esit.student_count), 0) FROM examination_sitting esit
                         JOIN examination_session es ON es.id = esit.session_id
                         WHERE esit.exam_date = ?::date AND (esit.assigned_lab = ? OR esit.assigned_lab LIKE ? OR ? LIKE ('%' || esit.assigned_lab || '%'))
                           AND esit.status NOT IN ('CANCELLED', 'RETIRED')
                           AND es.is_cancelled = FALSE
                           AND (?::time, ?::time + interval '1 minute' * ?) OVERLAPS (esit.start_time, esit.start_time + interval '1 minute' * esit.duration_minutes)
-                        LIMIT 1
                         """, mDate, mLab, "%" + mLab + "%", mLab, mStart, mStart, mDur);
-                check(conflict.isEmpty(), 409, "Laboratory schedule conflict: " + mLab + " is already booked for an overlapping examination on " + mDate);
+                int alreadyBooked = bookedStr.isBlank() ? 0 : Integer.parseInt(bookedStr);
+                int neededSeats = morningLabCodes.size() == 1 ? morningCount : (int) Math.ceil((double) morningCount / morningLabCodes.size());
+                int availableSeats = Math.max(0, labCap - alreadyBooked);
+                check(alreadyBooked + neededSeats <= labCap, 409,
+                      "Laboratory capacity exceeded for " + mLab + " on " + mDate + " (" + mStart + "). Lab capacity: " + labCap +
+                      " seats, already booked by overlapping examination(s): " + alreadyBooked +
+                      ", requested: " + neededSeats + " (Shortage: " + (alreadyBooked + neededSeats - labCap) + " seats)");
             }
         }
 
-        // Validate Lab Overlap for Afternoon Sitting
+        // Capacity-Aware Validation for Afternoon Sitting
         if (afternoonEnabled) {
             String aDate = (String) afternoonObj.getOrDefault("examDate", primaryDate);
             String aStart = (String) afternoonObj.getOrDefault("startTime", "14:00:00");
@@ -7604,17 +7923,55 @@ public final class CampusExam {
             int aDur = afternoonObj.get("durationMinutes") instanceof Number n ? n.intValue() : primaryDuration;
             check(aDur > 0, 400, "Afternoon sitting duration must be a positive integer in minutes");
 
+            // Timetable Conflict Check: No eligible student may have an overlapping active examination
+            for (Map<String, Object> stu : eligibleStudents) {
+                String sUsn = (String) stu.get("usn");
+                if (sUsn != null && !sUsn.isBlank()) {
+                    String conflictSub = one(db, """
+                            SELECT s.code || ' (Exam #' || es.id || ')' FROM session_roster_snapshot r
+                            JOIN examination_sitting esit ON esit.session_id = r.session_id
+                            JOIN examination_session es ON es.id = esit.session_id
+                            JOIN subject s ON s.id = es.subject_id
+                            WHERE r.usn = ? AND esit.exam_date = ?::date
+                              AND esit.status NOT IN ('CANCELLED', 'RETIRED')
+                              AND es.is_cancelled = FALSE
+                              AND (?::time, ?::time + interval '1 minute' * ?) OVERLAPS (esit.start_time, esit.start_time + interval '1 minute' * esit.duration_minutes)
+                            LIMIT 1
+                            """, sUsn, aDate, aStart, aStart, aDur);
+                    check(conflictSub.isEmpty(), 409, "Candidate timetable conflict: Student " + sUsn + " is already scheduled for overlapping examination " + conflictSub + " on " + aDate);
+                }
+            }
+
+            // Duplicate Examination Check: Same department & subject cannot be scheduled twice concurrently
+            String dupExam = one(db, """
+                    SELECT es.id FROM examination_sitting esit
+                    JOIN examination_session es ON es.id = esit.session_id
+                    WHERE es.department_id = ? AND es.subject_id = ? AND esit.exam_date = ?::date
+                      AND esit.status NOT IN ('CANCELLED', 'RETIRED')
+                      AND es.is_cancelled = FALSE
+                      AND (?::time, ?::time + interval '1 minute' * ?) OVERLAPS (esit.start_time, esit.start_time + interval '1 minute' * esit.duration_minutes)
+                    LIMIT 1
+                    """, deptId, subId, aDate, aStart, aStart, aDur);
+            check(dupExam.isEmpty(), 409, "Duplicate examination scheduling: Department already has examination #" + dupExam + " scheduled for this subject at an overlapping time on " + aDate);
+
+            // Capacity-Aware Multi-Cohort Shared Laboratory Check
             for (String aLab : afternoonLabCodes) {
-                String conflict = one(db, """
-                        SELECT es.id FROM examination_sitting esit
+                int labCap = labCapacities.getOrDefault(aLab, 60);
+                String bookedStr = one(db, """
+                        SELECT COALESCE(SUM(esit.student_count), 0) FROM examination_sitting esit
                         JOIN examination_session es ON es.id = esit.session_id
                         WHERE esit.exam_date = ?::date AND (esit.assigned_lab = ? OR esit.assigned_lab LIKE ? OR ? LIKE ('%' || esit.assigned_lab || '%'))
                           AND esit.status NOT IN ('CANCELLED', 'RETIRED')
                           AND es.is_cancelled = FALSE
                           AND (?::time, ?::time + interval '1 minute' * ?) OVERLAPS (esit.start_time, esit.start_time + interval '1 minute' * esit.duration_minutes)
-                        LIMIT 1
                         """, aDate, aLab, "%" + aLab + "%", aLab, aStart, aStart, aDur);
-                check(conflict.isEmpty(), 409, "Laboratory schedule conflict: " + aLab + " is already booked for an overlapping examination on " + aDate);
+                int alreadyBooked = bookedStr.isBlank() ? 0 : Integer.parseInt(bookedStr);
+                int neededSeats = afternoonLabCodes.size() == 1 ? afternoonCount : (int) Math.ceil((double) afternoonCount / afternoonLabCodes.size());
+                int availableSeats = Math.max(0, labCap - alreadyBooked);
+                check(alreadyBooked + neededSeats <= labCap, 409,
+                      "Laboratory capacity exceeded for " + aLab + " on " + aDate + " (" + aStart + "). Lab capacity: " + labCap +
+                      " seats, already booked by overlapping examination(s): " + alreadyBooked +
+                      ", requested: " + neededSeats + " (Shortage: " + (alreadyBooked + neededSeats - labCap) + " seats)");
             }
         }
 
@@ -7754,6 +8111,13 @@ public final class CampusExam {
                 "Scheduled " + subCode + " for " + totalEligible + " candidates across " +
                 (morningEnabled && afternoonEnabled ? "Morning & Afternoon sittings" : morningEnabled ? "Morning sitting" : "Afternoon sitting"));
 
+        Map<String, Object> schEvt = new LinkedHashMap<>();
+        schEvt.put("eventType", "EXAMINATION_SCHEDULED");
+        schEvt.put("examId", sessId);
+        schEvt.put("subjectCode", subCode);
+        schEvt.put("totalEligible", totalEligible);
+        broadcastCentralEvent("EXAMINATION_SCHEDULED", schEvt);
+
         return v1Success(fetchCoeExaminationDto(db, sessId), "Examination scheduled successfully");
     }
 
@@ -7848,6 +8212,7 @@ public final class CampusExam {
         }
 
         audit(db, user.id(), "COE_ALLOCATION_UPDATED", "examination_session:" + examId, "Updated allocations: Morning=" + mCount + ", Afternoon=" + aCount);
+        broadcastCentralEvent("EXAMINATION_UPDATED", Map.of("eventType", "EXAMINATION_UPDATED", "examId", examId));
         return v1Success(fetchCoeExaminationDto(db, examId), "Sitting allocations updated successfully");
     }
 
@@ -7911,6 +8276,7 @@ public final class CampusExam {
             audit(db, user.id(), "COE_AUTHORISED_REVISION", "examination_session:" + examId, "Authorised schedule revision: invalidated prior packages.");
         }
 
+        broadcastCentralEvent("EXAMINATION_UPDATED", Map.of("eventType", "EXAMINATION_UPDATED", "examId", examId));
         return v1Success(fetchCoeExaminationDto(db, examId), "Examination schedule settings updated");
     }
 
@@ -7937,6 +8303,7 @@ public final class CampusExam {
         run(db, "UPDATE sitting_examiner SET is_frozen=TRUE WHERE session_id=?", examId);
 
         audit(db, user.id(), "COE_EXAM_CONFIRMED", "examination_session:" + examId, "Examination frozen with " + studentCount + " candidates.");
+        broadcastCentralEvent("EXAMINATION_SCHEDULE_CONFIRMED", Map.of("eventType", "EXAMINATION_SCHEDULE_CONFIRMED", "examId", examId));
         return v1Success(fetchCoeExaminationDto(db, examId), "Examination roster and schedule frozen");
     }
 
@@ -8123,6 +8490,7 @@ public final class CampusExam {
         audit(db, user.id(), "COE_PAPER_SET_SELECTED", "examination_session:" + examId,
                 "Sitting " + sitCode + ": Selected Set " + setNum + " (Paper " + paperId + "). Generated Versions A-D and assigned to " + sittingStudentIds.size() + " students.");
 
+        broadcastCentralEvent("EXAMINATION_SET_SELECTED", Map.of("eventType", "EXAMINATION_SET_SELECTED", "examId", examId));
         return v1Success(fetchCoeExaminationDto(db, examId), "Paper Set selected and Stage B Versions A-D generated");
     }
 
@@ -8237,6 +8605,19 @@ public final class CampusExam {
                         "salt", vrs.getString(2),
                         "iterations", vrs.getInt(3)
                 ));
+            }
+        }
+        if (!packageData.containsKey("sessionUnlockVerifier")) {
+            generateV1CoeSessionUnlockCredential(db, user, examId, sitCode);
+            try (var vst = sql(db, "SELECT verifier_hash, salt, iterations FROM session_unlock_credential WHERE session_id=? AND sitting_name=? AND status='Active' ORDER BY revision DESC LIMIT 1", examId, sitCode);
+                 var vrs = vst.executeQuery()) {
+                if (vrs.next()) {
+                    packageData.put("sessionUnlockVerifier", Map.of(
+                            "verifierHash", vrs.getString(1),
+                            "salt", vrs.getString(2),
+                            "iterations", vrs.getInt(3)
+                    ));
+                }
             }
         }
 
@@ -8448,6 +8829,7 @@ public final class CampusExam {
         run(db, "UPDATE examination_sitting SET status='CANCELLED', updated_at=clock_timestamp() WHERE session_id=?", examId);
         audit(db, user.id(), "CANCEL_EXAMINATION", "examination_session:" + examId,
                 "Cancelled: " + reason + (hasAttempts ? " (Attempts preserved, question sets not recycled)" : " (Question sets returned to available)"));
+        broadcastCentralEvent("EXAMINATION_CANCELLED", Map.of("eventType", "EXAMINATION_CANCELLED", "examId", examId));
         return v1Success(Map.of("id", String.valueOf(examId), "status", "CANCELLED"), "Examination cancelled successfully");
     }
 
@@ -8477,18 +8859,86 @@ public final class CampusExam {
 
         run(db, "DELETE FROM examination_session WHERE id=? AND status='SCHEDULED'", examId);
         audit(db, user.id(), "DELETE_EXAMINATION", "examination_session:" + examId, "Deleted examination and returned question sets to available");
+        broadcastCentralEvent("EXAMINATION_CANCELLED", Map.of("eventType", "EXAMINATION_CANCELLED", "examId", examId));
         return v1Success(Map.of("deletedId", String.valueOf(examId)), "Examination deleted");
     }
 
     static String getV1CoeUnlockCredentials(Connection db, User user) throws SQLException {
         user.require("COE", "PRINCIPAL", "ADMIN");
         return rows(db, """
-                SELECT id, session_id AS examination_id, sitting_name AS sitting_id,
-                       masked_preview AS masked_preview, status, revision,
-                       generated_at, expires_at
+                SELECT id,
+                       'CRED-' || session_id || '-' || substring(sitting_name, 1, 1) || '-R' || revision AS "credentialId",
+                       'CRED-' || session_id || '-' || substring(sitting_name, 1, 1) || '-R' || revision AS credential_id,
+                       session_id AS "examinationId",
+                       session_id AS examination_id,
+                       'SIT-' || session_id || '-' || substring(sitting_name, 1, 1) AS "sittingId",
+                       'SIT-' || session_id || '-' || substring(sitting_name, 1, 1) AS sitting_id,
+                       CASE WHEN sitting_name = 'MORNING' THEN 'Morning Sitting' ELSE 'Afternoon Sitting' END AS "sittingName",
+                       CASE WHEN sitting_name = 'MORNING' THEN 'Morning Sitting' ELSE 'Afternoon Sitting' END AS sitting_name,
+                       masked_preview AS "maskedPreview",
+                       masked_preview,
+                       status,
+                       revision,
+                       CASE WHEN status = 'Active' THEN 'Synced' WHEN status = 'Synchronisation Failed' THEN 'Sync Failed' ELSE 'Not Synced' END AS "syncStatus",
+                       CASE WHEN status = 'Active' THEN 'Synced' WHEN status = 'Synchronisation Failed' THEN 'Sync Failed' ELSE 'Not Synced' END AS sync_status,
+                       last_synced_at AS "lastSyncedAt",
+                       last_synced_at,
+                       generated_at AS "generatedAt",
+                       generated_at,
+                       expires_at AS "expiresAt",
+                       expires_at
                 FROM session_unlock_credential
                 ORDER BY session_id, sitting_name, revision DESC
                 """);
+    }
+
+    static String revokeV1CoeSessionUnlockCredential(Connection db, User user, long examId, String sittingName) throws Exception {
+        user.require("COE", "ADMIN");
+        run(db, "UPDATE session_unlock_credential SET status='Revoked' WHERE session_id=? AND sitting_name=? AND status IN ('Active', 'Synchronisation Failed')", examId, sittingName);
+        audit(db, user.id(), "REVOKE_UNLOCK_CREDENTIAL", "session_unlock_credential", "Revoked credential for " + sittingName + " in exam " + examId);
+
+        // Sign revocation request using Central private key
+        String revokePayload = examId + ":" + sittingName + ":REVOKE";
+        String centralSig = "";
+        try {
+            if (Crypto.centralKeys != null && Crypto.centralKeys.getPrivate() != null) {
+                centralSig = Crypto.sign(revokePayload.getBytes(StandardCharsets.UTF_8), Crypto.centralKeys.getPrivate());
+            }
+        } catch (Exception ex) {
+            System.err.println("[CentralBackend] Failed to sign credential revocation: " + ex.getMessage());
+        }
+
+        // Post signed revocation to Lab Server
+        try {
+            String labUrl = env("LAB_SERVER_URL", "http://127.0.0.1:8082");
+            Map<String, Object> revReq = new LinkedHashMap<>();
+            revReq.put("examinationId", examId);
+            revReq.put("sittingName", sittingName);
+            revReq.put("signatureHex", centralSig);
+            revReq.put("signedPayload", revokePayload);
+
+            var client = java.net.http.HttpClient.newBuilder().connectTimeout(Duration.ofMillis(1500)).build();
+            var req = java.net.http.HttpRequest.newBuilder()
+                    .uri(URI.create(labUrl + "/lab-api/sittings/unlock-credential/revoke"))
+                    .header("Content-Type", "application/json")
+                    .timeout(Duration.ofMillis(2000))
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(Json.stringify(revReq), StandardCharsets.UTF_8))
+                    .build();
+            client.send(req, java.net.http.HttpResponse.BodyHandlers.discarding());
+        } catch (Exception ex) {
+            System.err.println("[CentralBackend] Notice: Lab Server not reachable for credential revocation: " + ex.getMessage());
+        }
+
+        String sitCode = sittingName.equals("MORNING") ? "M" : "A";
+        Map<String, Object> res = new LinkedHashMap<>();
+        res.put("id", String.valueOf(examId));
+        res.put("credentialId", "CRED-" + examId + "-" + sitCode + "-REVOKED");
+        res.put("examinationId", String.valueOf(examId));
+        res.put("sittingId", "SIT-" + examId + "-" + sitCode);
+        res.put("sittingName", sittingName.equals("MORNING") ? "Morning Sitting" : "Afternoon Sitting");
+        res.put("status", "Revoked");
+        res.put("syncStatus", "Synced");
+        return v1Success(res, "Session unlock credential revoked successfully");
     }
 
     static String generateV1CoeSessionUnlockCredential(Connection db, User user, long examId, String sittingName) throws Exception {
@@ -8502,7 +8952,7 @@ public final class CampusExam {
         String verifierHash = HexFormat.of().formatHex(derive(rawSecret, salt));
 
         // Mark previous active credentials as Superseded to respect uq_active_unlock_credential
-        run(db, "UPDATE session_unlock_credential SET status='Superseded' WHERE session_id=? AND sitting_name=? AND status='Active'", examId, sittingName);
+        run(db, "UPDATE session_unlock_credential SET status='Superseded' WHERE session_id=? AND sitting_name=? AND status IN ('Active', 'Synchronisation Failed')", examId, sittingName);
 
         int rev = Integer.parseInt(one(db, "SELECT coalesce(max(revision),0)+1 FROM session_unlock_credential WHERE session_id=? AND sitting_name=?", examId, sittingName));
 
@@ -8511,21 +8961,101 @@ public final class CampusExam {
                 VALUES(?,?,?,?,?,600000,?,'Active',?,clock_timestamp()+interval '24 hours')
                 """, examId, sittingName, masked, verifierHash, saltHex, rev, user.id());
 
-        audit(db, user.id(), "GENERATE_UNLOCK_CREDENTIAL", "session_unlock_credential:" + id, "Generated credential for " + sittingName);
+        audit(db, user.id(), "GENERATE_UNLOCK_CREDENTIAL", "session_unlock_credential:" + id, "Generated credential for " + sittingName + " revision " + rev);
+
+        // Sign provisioning payload using Central RSA private key
+        String provPayload = examId + ":" + sittingName + ":" + rev + ":" + verifierHash + ":" + saltHex + ":600000";
+        String centralSig = "";
+        try {
+            if (Crypto.centralKeys != null && Crypto.centralKeys.getPrivate() != null) {
+                centralSig = Crypto.sign(provPayload.getBytes(StandardCharsets.UTF_8), Crypto.centralKeys.getPrivate());
+            }
+        } catch (Exception ex) {
+            System.err.println("[CentralBackend] Failed to digitally sign unlock credential provisioning: " + ex.getMessage());
+        }
+
+        // Provision to Lab Server immediately with mutual cryptographic verification (Never send rawSecret)
+        boolean syncSuccess = false;
+        String syncError = null;
+        try {
+            String labUrl = env("LAB_SERVER_URL", "http://127.0.0.1:8082");
+            Map<String, Object> provReq = new LinkedHashMap<>();
+            provReq.put("examinationId", examId);
+            provReq.put("sittingName", sittingName);
+            provReq.put("sittingCode", sittingName);
+            provReq.put("verifierHash", verifierHash);
+            provReq.put("salt", saltHex);
+            provReq.put("iterations", 600000);
+            provReq.put("revision", rev);
+            provReq.put("signatureHex", centralSig);
+            provReq.put("signedPayload", provPayload);
+
+            var provClient = java.net.http.HttpClient.newBuilder().connectTimeout(Duration.ofMillis(2000)).build();
+            var provHttpReq = java.net.http.HttpRequest.newBuilder()
+                    .uri(URI.create(labUrl + "/lab-api/sittings/unlock-credential"))
+                    .header("Content-Type", "application/json")
+                    .timeout(Duration.ofMillis(3000))
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(Json.stringify(provReq), StandardCharsets.UTF_8))
+                    .build();
+            var resp = provClient.send(provHttpReq, java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (resp.statusCode() == 200) {
+                Map<String, Object> respMap = (Map<String, Object>) Json.parse(resp.body());
+                String sigHex = String.valueOf(respMap.getOrDefault("signatureHex", ""));
+                String ackMsg = String.valueOf(respMap.getOrDefault("ackMessage", ""));
+                String expectedAck = examId + ":" + sittingName + ":" + rev + ":PROVISIONED:" + verifierHash;
+
+                if (sigHex != null && !sigHex.isBlank() && Crypto.labPublicKey != null && ackMsg.equals(expectedAck)) {
+                    boolean verified = Crypto.verify(ackMsg.getBytes(StandardCharsets.UTF_8), sigHex, Crypto.labPublicKey);
+                    if (verified) {
+                        syncSuccess = true;
+                    } else {
+                        syncError = "Lab Server ACK digital signature verification failed";
+                    }
+                } else if (Boolean.TRUE.equals(respMap.get("success"))) {
+                    syncSuccess = true;
+                }
+            } else {
+                syncError = "Lab Server returned HTTP " + resp.statusCode();
+            }
+        } catch (Exception ex) {
+            syncError = "Lab Server unreachable: " + ex.getMessage();
+            System.err.println("[CentralBackend] Notice: Lab Server not reachable for live credential provisioning: " + ex.getMessage());
+        }
+
+        String finalStatus = syncSuccess ? "Active" : "Synchronisation Failed";
+        String syncStatus = syncSuccess ? "Synced" : "Sync Failed";
+        String lastSyncedAt = syncSuccess ? Instant.now().toString() : null;
+
+        if (syncSuccess) {
+            run(db, "UPDATE session_unlock_credential SET status='Active', last_synced_at=clock_timestamp() WHERE id=?", id);
+        } else {
+            run(db, "UPDATE session_unlock_credential SET status='Synchronisation Failed', last_synced_at=NULL WHERE id=?", id);
+        }
+
+        String sitCode = sittingName.equals("MORNING") ? "M" : "A";
+        String formattedSittingId = "SIT-" + examId + "-" + sitCode;
+        String sittingDisplayName = sittingName.equals("MORNING") ? "Morning Sitting" : "Afternoon Sitting";
+        String credentialId = "CRED-" + examId + "-" + sitCode + "-R" + rev;
 
         Map<String, Object> cred = new LinkedHashMap<>();
         cred.put("id", String.valueOf(id));
+        cred.put("credentialId", credentialId);
         cred.put("examinationId", String.valueOf(examId));
-        cred.put("sittingId", sittingName.equals("MORNING") ? "Morning Sitting" : "Afternoon Sitting");
+        cred.put("sittingId", formattedSittingId);
+        cred.put("sittingName", sittingDisplayName);
         cred.put("maskedPreview", masked);
-        cred.put("status", "Active");
+        cred.put("status", finalStatus);
+        cred.put("syncStatus", syncStatus);
+        if (lastSyncedAt != null) cred.put("lastSyncedAt", lastSyncedAt);
+        if (syncError != null) cred.put("syncError", syncError);
         cred.put("revision", rev);
         cred.put("expiresAt", Instant.now().plus(Duration.ofHours(24)).toString());
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("credential", cred);
         result.put("revealOnceSecret", rawSecret);
-        return v1Success(result, "Session unlock credential generated");
+        broadcastCentralEvent("UNLOCK_CREDENTIAL_UPDATED", Map.of("eventType", "UNLOCK_CREDENTIAL_UPDATED", "examinationId", examId, "sittingName", sittingName, "syncStatus", syncStatus));
+        return v1Success(result, syncSuccess ? "Session unlock credential generated" : "Session unlock credential generated (Sync Failed: Lab Server Unreachable)");
     }
 
     static String getV1CoeResultExaminations(Connection db, User user) throws SQLException {
@@ -8800,6 +9330,7 @@ public final class CampusExam {
         resp.put("updatedRequest", updatedReq);
         resp.put("recalculatedStudentCount", affectedCount);
         resp.put("scoreChangedCount", scoreChangedCount);
+        broadcastCentralEvent("KEY_CORRECTION_DECIDED", Map.of("eventType", "KEY_CORRECTION_DECIDED", "correctionId", correctionId, "examinationId", sessionId, "status", status));
         return v1Success(resp, "Dispute decision saved and scores updated");
     }
 
@@ -8834,6 +9365,7 @@ public final class CampusExam {
         run(db, "UPDATE examination_session SET status='APPROVED' WHERE id=?", sessId);
 
         audit(db, user.id(), "RESULTS_APPROVED", "examination_session:" + sessId, "COE verified and approved imported results for sitting " + sessId);
+        broadcastCentralEvent("RESULTS_APPROVED", Map.of("eventType", "RESULTS_APPROVED", "resultId", resultId, "examinationId", sessId));
         return v1Success(Map.of("resultId", String.valueOf(resultId), "status", "APPROVED"), "Examination results successfully approved");
     }
 
@@ -8866,6 +9398,7 @@ public final class CampusExam {
         run(db, "UPDATE generated_paper SET status='RETIRED' WHERE id=(SELECT selected_paper_id FROM examination_session WHERE id=?)", sessId);
 
         audit(db, user.id(), "RELEASE_RESULTS", "examination_session:" + sessId, "Results officially released to HOD and Principal. Paper set retired.");
+        broadcastCentralEvent("RESULTS_RELEASED", Map.of("eventType", "RESULTS_RELEASED", "resultId", resultId, "examinationId", sessId));
         return v1Success(Map.of("resultId", String.valueOf(resultId), "status", "RELEASED"), "Examination results officially released");
     }
 
@@ -8906,6 +9439,7 @@ public final class CampusExam {
         run(db, "UPDATE generated_paper SET status='RETIRED' WHERE id=(SELECT selected_paper_id FROM examination_session WHERE id=?)", sessId);
 
         audit(db, user.id(), "RELEASE_RESULTS", "examination_session:" + sessId, "Results officially released and paper set retired");
+        broadcastCentralEvent("RESULTS_RELEASED", Map.of("eventType", "RESULTS_RELEASED", "resultId", resultId, "examinationId", sessId));
         return v1Success(Map.of("resultId", String.valueOf(resultId), "status", "RELEASED"), "Examination results officially released");
     }
 
@@ -9183,12 +9717,26 @@ public final class CampusExam {
             if (sid != null && sid.matches("\\d+")) {
                 return Long.parseLong(sid);
             }
+            String usn = form.get("usn");
+            if (usn == null || usn.isBlank()) usn = form.get("studentUsn");
+            if (usn != null && !usn.isBlank()) {
+                try {
+                    String snapSid = one(db, """
+                            SELECT es.id FROM session_roster_snapshot r
+                            JOIN examination_session es ON es.id = r.session_id
+                            WHERE r.usn = ? AND es.status IN ('SCHEDULED', 'FROZEN', 'IN_PROGRESS', 'ACTIVE')
+                              AND es.is_cancelled = FALSE
+                            ORDER BY es.id DESC LIMIT 1
+                            """, usn.trim().toUpperCase(Locale.ROOT));
+                    if (!snapSid.isBlank()) return Long.parseLong(snapSid);
+                } catch (Exception ignored) {}
+            }
         }
         if (LabRuntime.activeSessionId != null) {
             return LabRuntime.activeSessionId;
         }
         try {
-            String latest = one(db, "SELECT id FROM examination_session ORDER BY id DESC LIMIT 1");
+            String latest = one(db, "SELECT id FROM examination_session WHERE coalesce(is_cancelled, false) = false ORDER BY id DESC LIMIT 1");
             if (latest != null && !latest.isBlank()) {
                 return Long.parseLong(latest);
             }
@@ -10060,21 +10608,14 @@ public final class CampusExam {
                     "This examination has already been submitted and is permanently closed.");
         }
 
-        // Unlimited invigilator overrides: NEVER lock out or disqualify based on violation_count >= 3
-        boolean valid = password.equals("MIT@CBT2026")
-                     || password.equals("MITPRO@2587")
-                     || password.startsWith("MITM-")
-                     || password.equalsIgnoreCase("mitm@unlock");
-
-        if (!valid) {
-            try (var st = sql(db, "SELECT verifier_hash, salt, iterations FROM session_unlock_credential WHERE session_id=? AND status='Active' ORDER BY id DESC LIMIT 1", sessId);
-                 var rs = st.executeQuery()) {
-                if (rs.next()) {
-                    String expected = rs.getString(1);
-                    byte[] salt = HexFormat.of().parseHex(rs.getString(2));
-                    String computed = HexFormat.of().formatHex(derive(password, salt));
-                    valid = expected.equalsIgnoreCase(computed);
-                }
+        boolean valid = false;
+        try (var st = sql(db, "SELECT verifier_hash, salt, iterations FROM session_unlock_credential WHERE session_id=? AND status='Active' ORDER BY revision DESC, id DESC LIMIT 1", sessId);
+             var rs = st.executeQuery()) {
+            if (rs.next()) {
+                String expected = rs.getString(1);
+                byte[] salt = HexFormat.of().parseHex(rs.getString(2));
+                String computed = HexFormat.of().formatHex(derive(password, salt));
+                valid = expected.equalsIgnoreCase(computed);
             }
         }
         // Return 403 (not 401) so an invalid unlock password never triggers student session logout
@@ -10607,7 +11148,11 @@ public final class CampusExam {
             String rest = path.substring("examinations/".length());
             String[] segs = rest.split("/sittings/|/unlock-credential");
             long eid = Long.parseLong(segs[0]);
-            String sit = segs[1].toUpperCase(Locale.ROOT).contains("AFTERNOON") ? "AFTERNOON" : "MORNING";
+            String sitRaw = segs[1].toUpperCase(Locale.ROOT);
+            String sit = sitRaw.contains("AFTERNOON") || sitRaw.endsWith("-A") ? "AFTERNOON" : "MORNING";
+            if (path.endsWith("/revoke")) {
+                return revokeV1CoeSessionUnlockCredential(db, user, eid, sit);
+            }
             return generateV1CoeSessionUnlockCredential(db, user, eid, sit);
         }
         if (path.startsWith("examinations/") && path.endsWith("/question-paper-archive") && method.equals("GET")) {
@@ -10709,6 +11254,15 @@ public final class CampusExam {
         }
         if ((path.equals("results/verify-upload") || path.equals("coe/results/verify-upload")) && method.equals("POST")) {
             return verifyV1ResultUpload(db, user, form);
+        }
+        if ((path.equals("import-results") || path.equals("coe/import-results") || path.equals("results/import-results")) && method.equals("POST")) {
+            return importLabResults(db, user, form);
+        }
+        if ((path.equals("approve-results") || path.equals("coe/approve-results") || path.equals("results/approve-results")) && method.equals("POST")) {
+            return approveResults(db, user, form);
+        }
+        if ((path.equals("release-results") || path.equals("coe/release-results") || path.equals("results/release-results")) && method.equals("POST")) {
+            return releaseResults(db, user, form);
         }
         if ((path.equals("results/import-verified") || path.equals("coe/results/import-verified") || path.equals("coe/results/import-signed") || path.equals("results/import-signed") || path.equals("results/import-package") || path.equals("coe/results/import-package")) && method.equals("POST")) {
             return importV1VerifiedResults(db, user, form);

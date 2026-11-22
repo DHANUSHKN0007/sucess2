@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import {
   AlertCircle,
@@ -20,7 +20,7 @@ import { LoadingState } from '../../components/common/LoadingState';
 import { useExamSession } from '../../hooks/useExamSession';
 import { emergencyRecoveryService } from '../../services/emergencyRecoveryService';
 import { API_MODE } from '../../services/apiConfig';
-import { securityService } from '../../services/securityService';
+import { AttemptScope, securityService } from '../../services/securityService';
 import { SecurityLockState, SecurityViolationType } from '../../types/security';
 import { FullScreenSecurityLockScreen } from '../../components/security/FullScreenSecurityLockScreen';
 
@@ -42,12 +42,27 @@ export const ExamInstructionsPage: React.FC = () => {
   const [isStarting, setIsStarting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Full Screen Security Lockdown State
+  const attemptScope: AttemptScope = useMemo(
+    () => ({
+      studentUsn: student?.usn,
+      examinationId: examSession?.examinationId,
+      sittingName: examSession?.sessionSlot || examSession?.sittingName,
+    }),
+    [student?.usn, examSession?.examinationId, examSession?.sessionSlot, examSession?.sittingName]
+  );
+
+  // Full Screen Security Lockdown State scoped to current examination attempt
   const [lockState, setLockState] = useState<SecurityLockState>(() =>
-    securityService.getLockState()
+    securityService.getLockState(attemptScope)
   );
   const [isVerifyingLock, setIsVerifyingLock] = useState<boolean>(false);
   const [lockVerificationError, setLockVerificationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (student?.usn && examSession?.examinationId) {
+      setLockState(securityService.getLockState(attemptScope));
+    }
+  }, [attemptScope, student?.usn, examSession?.examinationId]);
 
   // Attempt to enter fullscreen upon mounting instructions page if not already in fullscreen
   useEffect(() => {
@@ -78,8 +93,9 @@ export const ExamInstructionsPage: React.FC = () => {
         studentUsn: student.usn,
         studentName: student.fullName,
         examinationId: examSession.examinationId,
+        sittingName: examSession.sessionSlot || examSession.sittingName,
         currentQuestionIndex: 0,
-        remainingSeconds: examSession.durationMinutes * 60,
+        remainingSeconds: (examSession.durationMinutes || 120) * 60,
         answeredCount: 0,
       });
       setLockState(updated);
@@ -237,7 +253,7 @@ export const ExamInstructionsPage: React.FC = () => {
   useEffect(() => {
     if (
       student &&
-      examSession?.availabilityState === 'ACTIVE' &&
+      (examSession?.availabilityState === 'ACTIVE' || examSession?.availabilityState === 'SCHEDULED_WAITING') &&
       !instructions
     ) {
       loadInstructions().catch((err) => {
@@ -258,7 +274,7 @@ export const ExamInstructionsPage: React.FC = () => {
     return <Navigate to="/student/completion" replace />;
   }
 
-  if (examSession.availabilityState !== 'ACTIVE') {
+  if (examSession.availabilityState !== 'ACTIVE' && examSession.availabilityState !== 'SCHEDULED_WAITING') {
     return <Navigate to="/student/login" replace />;
   }
 
@@ -284,6 +300,7 @@ export const ExamInstructionsPage: React.FC = () => {
               studentUsn: student.usn,
               studentName: student.fullName,
               examinationId: examSession.examinationId,
+              sittingName: examSession.sessionSlot || examSession.sittingName,
             });
             setIsVerifyingLock(false);
             if (!res.success) {
@@ -302,7 +319,7 @@ export const ExamInstructionsPage: React.FC = () => {
                 // Ignore
               }
             }
-            setLockState(securityService.getLockState());
+            setLockState(securityService.getLockState(attemptScope));
             return true;
           } catch (err) {
             setIsVerifyingLock(false);
@@ -324,17 +341,13 @@ export const ExamInstructionsPage: React.FC = () => {
       return;
     }
 
-    // Request full-screen mode immediately on user click gesture
+    // Request full-screen mode immediately on user click gesture (non-blocking)
     if (
       typeof document !== 'undefined' &&
       !document.fullscreenElement &&
       document.documentElement?.requestFullscreen
     ) {
-      try {
-        await document.documentElement.requestFullscreen();
-      } catch {
-        // User gesture accepted, proceed
-      }
+      document.documentElement.requestFullscreen().catch(() => {});
     }
 
     setErrorMsg(null);

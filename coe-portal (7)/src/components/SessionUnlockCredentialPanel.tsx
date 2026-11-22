@@ -254,14 +254,14 @@ export const SessionUnlockCredentialPanel: React.FC<
           <div className="text-[#64748B] dark:text-slate-400">Lab Server Verifier Sync</div>
           <div
             className={`font-semibold mt-0.5 ${
-              credential?.syncStatus === 'Synced'
+              (credential?.syncStatus === 'Synced' || (credential as any)?.sync_status === 'Synced' || credential?.status === 'Active')
                 ? 'text-[#16834A] dark:text-emerald-400'
-                : credential?.syncStatus === 'Sync Failed'
+                : (credential?.syncStatus === 'Sync Failed' || (credential as any)?.sync_status === 'Sync Failed' || credential?.status === 'Synchronisation Failed')
                   ? 'text-[#B42318] dark:text-red-400'
                   : 'text-[#64748B] dark:text-slate-300'
             }`}
           >
-            {credential ? credential.syncStatus : 'Not Synced'}
+            {credential ? (credential.syncStatus || (credential as any)?.sync_status || (credential.status === 'Active' ? 'Synced' : 'Not Synced')) : 'Not Synced'}
           </div>
         </div>
         <div>

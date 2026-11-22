@@ -1,3 +1,8 @@
+# ====================================================================
+# MAHARAJA INSTITUTE OF TECHNOLOGY MYSORE - EXAMINATION MANAGEMENT SYSTEM
+# GIT IGNORE SPECIFICATION
+# ====================================================================
+
 # Dependencies
 node_modules/
 */node_modules/
@@ -8,6 +13,7 @@ node_modules/
 dist/
 */dist/
 */*/dist/
+*/*/*/dist/
 build/
 */build/
 */*/build/
@@ -17,10 +23,22 @@ build_dev/
 *.class
 
 # Environment files
+.env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+*.env.local
+
+# Cryptographic Keys and Credentials
+*.key
+*/*.key
+*/*/*.key
+*_private.key
+*.pem
+*.pfx
+*.p12
+*.key.bak
 
 # Logs and runtime caches
 *.log
@@ -32,12 +50,37 @@ __pycache__/
 */*/__pycache__/
 *.pyc
 
-# Runtime data & temp directories
+# Runtime data, packages, submissions, and temporary uploads
 scratch/
 audit_storage/
 lab_storage/
 backups/
 .system_generated/
+uploads/temp/
+*/uploads/temp/
+*/*/uploads/temp/
+*/*/*/uploads/temp/
+uploads/originals/
+*/uploads/originals/
+*/*/uploads/originals/
+*/*/*/uploads/originals/
+
+# One-off scratch inspection scripts
+check_sessions.py
+inspect_exam.py
+prepare_live_exam.py
+release_papers.py
+release_papers.sql
+scratch_inspect.py
+temp_reset.sql
+CampusExam/CheckAppUser.java
+CampusExam/CheckLabRoster.java
+CampusExam/CheckSemesters.java
+CampusExam/InspectExam.java
+CampusExam/InspectExam122Creation.java
+CampusExam/InspectPackageJson.java
+CampusExam/InspectStudents.java
+CampusExam/TestLoginDirect.java
 
 # OS and IDE files
 .DS_Store
@@ -45,3 +88,4 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+*.swo

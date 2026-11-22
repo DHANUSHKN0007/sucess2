@@ -131,7 +131,7 @@ export const ExamSessionProvider: React.FC<{ children: React.ReactNode }> = ({
           setSubmissionReceipt(sessionData.submissionReceipt);
         }
 
-        if (sessionData.examSession.availabilityState === 'ACTIVE') {
+        if (sessionData.examSession.availabilityState === 'ACTIVE' || sessionData.examSession.availabilityState === 'SCHEDULED_WAITING') {
           const instr = await instructionService.fetchInstructions();
           if (mounted) setInstructions(instr);
 
@@ -162,6 +162,9 @@ export const ExamSessionProvider: React.FC<{ children: React.ReactNode }> = ({
             if (Object.keys(runtimeState.responses).length > 0) {
               setSaveAckStatus('SAVED');
             }
+          } else {
+            const durationMins = sessionData.examSession.durationMinutes || 120;
+            setRemainingSeconds(durationMins * 60);
           }
         }
       } catch {
@@ -514,7 +517,7 @@ export const ExamSessionProvider: React.FC<{ children: React.ReactNode }> = ({
     setSubmitted(sessionState.submitted);
     setSubmissionReceipt(sessionState.submissionReceipt || null);
 
-    if (res.examSession.availabilityState === 'ACTIVE') {
+    if (res.examSession.availabilityState === 'ACTIVE' || res.examSession.availabilityState === 'SCHEDULED_WAITING') {
       const instr = await instructionService.fetchInstructions();
       setInstructions(instr);
 
@@ -535,6 +538,9 @@ export const ExamSessionProvider: React.FC<{ children: React.ReactNode }> = ({
           }
         });
         setCurrentQuestionIndex(lastVisited);
+      } else {
+        const durationMins = res.examSession.durationMinutes || 120;
+        setRemainingSeconds(durationMins * 60);
       }
     }
   }, []);

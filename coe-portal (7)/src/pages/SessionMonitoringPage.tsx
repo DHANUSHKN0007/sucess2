@@ -1,9 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Clock,
   Filter,
   Laptop,
+  Radio,
   RefreshCw,
   Search,
   Server,
@@ -12,7 +13,9 @@ import {
 import { useExaminationStore } from '../hooks/useExaminationStore';
 import { StatusIndicator } from '../components/StatusIndicator';
 import { SessionUnlockCredentialPanel } from '../components/SessionUnlockCredentialPanel';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 import { formatSemesterLabel } from '../utils/academicSemesters';
+import { getApiConfig } from '../services/apiClient';
 
 export type MonitoringSectionId =
   | 'overall-monitoring'
@@ -36,8 +39,19 @@ export const SessionMonitoringPage: React.FC = () => {
   } = useExaminationStore();
 
   const [searchParams] = useSearchParams();
-  const activeSection = (searchParams.get('section') ||
-    'overall-monitoring') as MonitoringSectionId;
+  const rawSection = (searchParams.get('section') || '').trim();
+  const activeSection = useMemo<MonitoringSectionId>(() => {
+    if (rawSection === 'unlocks' || rawSection === 'suspicious-activity') {
+      return 'suspicious-activity';
+    }
+    if (rawSection === 'student-monitoring' || rawSection === 'students') {
+      return 'student-monitoring';
+    }
+    if (rawSection === 'pc-recovery' || rawSection === 'recovery') {
+      return 'pc-recovery';
+    }
+    return 'overall-monitoring';
+  }, [rawSection]);
 
   const [semesterFilter, setSemesterFilter] = useState<string>('ALL');
 
@@ -59,6 +73,7 @@ export const SessionMonitoringPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [connectionFilter, setConnectionFilter] = useState<string>('ALL');
   const [refreshing, setRefreshing] = useState(false);
+  const [sseConnected, setSseConnected] = useState<boolean>(false);
 
   const activeSessionContext = useMemo(() => {
     if (!activeSession) return null;
@@ -70,8 +85,12 @@ export const SessionMonitoringPage: React.FC = () => {
     const credential = sitting
       ? sessionUnlockCredentials.find(
           (c) =>
-            c.examinationId === activeSession.examinationId &&
-            c.sittingId === sitting.sittingId
+            (String(c.examinationId) === String(activeSession.examinationId) || String((c as any).examination_id) === String(activeSession.examinationId)) &&
+            (c.sittingId === sitting.sittingId ||
+             c.sittingId === sitting.sittingName ||
+             c.sittingName === sitting.sittingName ||
+             (c as any).sitting_name === sitting.sittingName ||
+             (sitting.sittingName && c.sittingName?.toLowerCase() === sitting.sittingName.toLowerCase()))
         )
       : undefined;
     const labServer =
@@ -94,7 +113,8 @@ export const SessionMonitoringPage: React.FC = () => {
 
   const filteredStudents = useMemo(() => {
     if (!activeSession) return [];
-    return activeSession.students.filter((st) => {
+    const studentsList = Array.isArray(activeSession.students) ? activeSession.students : [];
+    return studentsList.filter((st) => {
       const q = studentSearch.trim().toLowerCase();
       const matchesQuery =
         !q ||
@@ -108,6 +128,89 @@ export const SessionMonitoringPage: React.FC = () => {
       return matchesQuery && matchesStatus && matchesConnection;
     });
   }, [activeSession, studentSearch, statusFilter, connectionFilter]);
+
+  const normalizedSuspiciousEvents = useMemo(() => {
+    if (!activeSession) return [];
+    const rawList = Array.isArray(activeSession.suspiciousEvents)
+      ? activeSession.suspiciousEvents
+      : [];
+    return rawList.map((ev: any, idx: number) => {
+      const id = String(ev.id || ev.eventId || `sec-evt-${idx}`);
+      const usn = String(ev.usn || ev.studentUsn || 'Unknown USN');
+      const studentName = String(
+        ev.studentName ||
+        (Array.isArray(activeSession.students) ? activeSession.students : []).find(
+          (s) => s.usn === usn
+        )?.studentName ||
+        usn
+      );
+      const pcNumber = String(ev.pcNumber || ev.workstationId || 'PC-01');
+      const eventType = String(ev.eventType || 'Security Event');
+      const timestamp = String(ev.timestamp || ev.recordedAt || '—');
+      const examinationCode = String(
+        ev.examinationCode || activeSession.examinationCode || 'EXAM'
+      );
+
+      let lockStatusStr = '';
+      if (typeof ev.lockStatus === 'string' && ev.lockStatus.trim().length > 0) {
+        lockStatusStr = ev.lockStatus;
+      } else if (
+        ev.resolved === true ||
+        (typeof ev.status === 'string' && ev.status.toLowerCase().includes('unlock'))
+      ) {
+        lockStatusStr = 'Unlocked by Authorised Invigilator';
+      } else {
+        lockStatusStr = 'Locked - Awaiting Invigilator';
+      }
+
+      const isLocked =
+        lockStatusStr.toLowerCase().includes('lock') &&
+        !lockStatusStr.toLowerCase().includes('unlock');
+
+      return {
+        id,
+        usn,
+        studentName,
+        pcNumber,
+        eventType,
+        timestamp,
+        examinationCode,
+        lockStatus: lockStatusStr,
+        isLocked,
+        invigilatorIdentity:
+          ev.invigilatorIdentity || (ev.resolved ? 'Authorized Invigilator' : undefined),
+        unlockTime: ev.unlockTime || ev.resolvedAt,
+        unlockCredentialId: ev.unlockCredentialId,
+        unlockCredentialRevision: ev.unlockCredentialRevision,
+        unlockReason:
+          ev.unlockReason || (ev.resolved ? 'Workstation unlocked by invigilator' : undefined),
+      };
+    });
+  }, [activeSession]);
+
+  const normalizedPcRecoveryEvents = useMemo(() => {
+    if (!activeSession) return [];
+    const rawList = Array.isArray(activeSession.pcRecoveryEvents)
+      ? activeSession.pcRecoveryEvents
+      : [];
+    return rawList.map((rec: any, idx: number) => ({
+      id: String(rec.id || rec.recoveryId || `rec-${idx}`),
+      usn: String(rec.usn || rec.studentUsn || 'Unknown USN'),
+      studentName: String(rec.studentName || rec.usn || 'Candidate'),
+      examinationCode: String(rec.examinationCode || activeSession.examinationCode || 'EXAM'),
+      sittingName: String(rec.sittingName || activeSession.sittingName || 'Morning Sitting'),
+      oldPcNumber: String(rec.oldPcNumber || rec.sourcePcNumber || 'PC-OLD'),
+      newPcNumber: String(rec.newPcNumber || rec.targetPcNumber || 'PC-NEW'),
+      labId: rec.labId || activeSession.labId || 'LAB-CSE-01',
+      invigilatorIdentity: String(rec.invigilatorIdentity || rec.operatorIdentity || 'Authorized Invigilator'),
+      recoveryTokenId: rec.recoveryTokenId,
+      timestamp: String(rec.timestamp || rec.recordedAt || '—'),
+      reason: String(rec.reason || 'Hardware / OS recovery'),
+      previousPcRevoked: rec.previousPcRevoked !== false,
+      savedAnswersPreserved: rec.savedAnswersPreserved !== false,
+      originalTimerPreserved: rec.originalTimerPreserved !== false,
+    }));
+  }, [activeSession]);
 
   const handleRefreshTelemetry = async () => {
     if (!activeSession) return;
@@ -129,6 +232,50 @@ export const SessionMonitoringPage: React.FC = () => {
       setRefreshing(false);
     }
   };
+
+  useEffect(() => {
+    if (!activeSession?.sessionId) return;
+    const config = getApiConfig();
+    const sseUrl = `${config.labApiBaseUrl}/monitoring/stream?sessionId=${encodeURIComponent(activeSession.sessionId)}`;
+    let es: EventSource | null = null;
+    let reconnectTimeout: any = null;
+
+    const connectSse = () => {
+      try {
+        es = new EventSource(sseUrl);
+        es.onopen = () => {
+          setSseConnected(true);
+        };
+        es.onerror = () => {
+          setSseConnected(false);
+          es?.close();
+          reconnectTimeout = setTimeout(connectSse, 5000);
+        };
+        const onEvent = () => {
+          refreshSessionMonitor(activeSession.sessionId).catch(() => {});
+        };
+        es.addEventListener('student_connected', onEvent);
+        es.addEventListener('exam_started', onEvent);
+        es.addEventListener('student_locked', onEvent);
+        es.addEventListener('student_unlocked', onEvent);
+        es.addEventListener('pc_recovery', onEvent);
+        es.addEventListener('student_submitted', onEvent);
+        es.addEventListener('telemetry_update', onEvent);
+      } catch {
+        setSseConnected(false);
+      }
+    };
+
+    connectSse();
+
+    return () => {
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (es) {
+        es.close();
+      }
+      setSseConnected(false);
+    };
+  }, [activeSession?.sessionId, refreshSessionMonitor]);
 
   if (!activeSession) {
     return (
@@ -178,6 +325,19 @@ export const SessionMonitoringPage: React.FC = () => {
 
         <div className="flex flex-wrap items-center gap-3 shrink-0">
           <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#F5F7FB] dark:bg-[#0F172A] border border-[#D9E2EF] dark:border-[#334155] text-sm">
+            {sseConnected ? (
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                Live SSE Stream
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                <span className="w-2 h-2 rounded-full bg-amber-400" />
+                SSE Reconnecting
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#F5F7FB] dark:bg-[#0F172A] border border-[#D9E2EF] dark:border-[#334155] text-sm">
             <Server
               className={`w-4 h-4 ${
                 activeSession.labServerStatus === 'Connected'
@@ -219,6 +379,7 @@ export const SessionMonitoringPage: React.FC = () => {
           SECTION 1: OVERALL EXAMINATION MONITORING
          ======================================================================== */}
       {activeSection === 'overall-monitoring' && (
+        <ErrorBoundary fallbackTitle="Unable to display Overall Examination Monitoring view">
         <div className="space-y-7">
           <div className="bg-white dark:bg-[#1E293B] border border-[#D9E2EF] dark:border-[#334155] rounded-xl p-6 sm:p-7 shadow-xs space-y-6">
             <div>
@@ -444,17 +605,19 @@ export const SessionMonitoringPage: React.FC = () => {
             />
           )}
         </div>
+        </ErrorBoundary>
       )}
 
       {/* ========================================================================
           SECTION 2: INDIVIDUAL STUDENT MONITORING
          ======================================================================== */}
       {activeSection === 'student-monitoring' && (
+        <ErrorBoundary fallbackTitle="Unable to display Individual Student Monitoring view">
         <div className="bg-white dark:bg-[#1E293B] border border-[#D9E2EF] dark:border-[#334155] rounded-xl p-6 sm:p-7 shadow-xs space-y-6">
           <div className="border-b border-[#D9E2EF] dark:border-[#334155] pb-5">
             <h1 className="text-[26px] sm:text-[28px] font-bold text-[#1F2937] dark:text-slate-100 leading-tight">
               Individual Student Monitoring ({filteredStudents.length} of{' '}
-              {activeSession.students.length})
+              {Array.isArray(activeSession.students) ? activeSession.students.length : 0})
             </h1>
           </div>
 
@@ -592,207 +755,224 @@ export const SessionMonitoringPage: React.FC = () => {
                       </span>
                     </td>
                     <td className="py-3.5 px-4 text-[13px] text-[#64748B] dark:text-slate-300 max-w-xs">
-                      {st.invigilatorUnlockHistory.length > 0
+                      {Array.isArray(st.invigilatorUnlockHistory) && st.invigilatorUnlockHistory.length > 0
                         ? st.invigilatorUnlockHistory.join('; ')
                         : '—'}
                     </td>
                     <td className="py-3.5 px-4 text-[13px] text-[#64748B] dark:text-slate-300 max-w-xs">
-                      {st.pcRecoveryHistory.length > 0
+                      {Array.isArray(st.pcRecoveryHistory) && st.pcRecoveryHistory.length > 0
                         ? st.pcRecoveryHistory.join('; ')
                         : '—'}
                     </td>
                   </tr>
                 ))}
+                {filteredStudents.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={11}
+                      className="py-10 text-center text-sm text-[#64748B] dark:text-slate-400"
+                    >
+                      No student records found matching the current filters.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
         </div>
+        </ErrorBoundary>
       )}
 
       {/* ========================================================================
           SECTION 3: SUSPICIOUS ACTIVITY & INVIGILATOR UNLOCKS
          ======================================================================== */}
       {activeSection === 'suspicious-activity' && (
-        <div className="bg-white dark:bg-[#1E293B] border border-[#D9E2EF] dark:border-[#334155] rounded-xl p-6 sm:p-7 shadow-xs space-y-6">
-          <div className="border-b border-[#D9E2EF] dark:border-[#334155] pb-5">
-            <h1 className="text-[26px] sm:text-[28px] font-bold text-[#1F2937] dark:text-slate-100 leading-tight flex items-center gap-3">
-              <ShieldAlert className="w-7 h-7 text-[#B42318]" />
-              Suspicious Activity &amp; Invigilator Unlock Log
-            </h1>
-          </div>
+        <ErrorBoundary fallbackTitle="Unable to display Suspicious Activity & Unlocks view">
+          <div className="bg-white dark:bg-[#1E293B] border border-[#D9E2EF] dark:border-[#334155] rounded-xl p-6 sm:p-7 shadow-xs space-y-6">
+            <div className="border-b border-[#D9E2EF] dark:border-[#334155] pb-5">
+              <h1 className="text-[26px] sm:text-[28px] font-bold text-[#1F2937] dark:text-slate-100 leading-tight flex items-center gap-3">
+                <ShieldAlert className="w-7 h-7 text-[#B42318]" />
+                Suspicious Activity &amp; Invigilator Unlock Log
+              </h1>
+            </div>
 
-          <div className="overflow-x-auto border border-[#D9E2EF] dark:border-[#334155] rounded-xl">
-            <table className="w-full text-left border-collapse text-sm">
-              <thead>
-                <tr className="bg-[#F5F7FB] dark:bg-[#0F172A]/60 border-b border-[#D9E2EF] dark:border-[#334155] text-xs font-bold text-[#64748B] dark:text-slate-400 uppercase tracking-wider">
-                  <th className="py-4 px-5">Student USN &amp; PC</th>
-                  <th className="py-4 px-5">Event Type &amp; Timestamp</th>
-                  <th className="py-4 px-5">Lock Status</th>
-                  <th className="py-4 px-5">Invigilator Unlock Details</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#D9E2EF] dark:divide-[#334155]">
-                {activeSession.suspiciousEvents.map((ev) => (
-                  <tr key={ev.id}>
-                    <td className="py-4 px-5">
-                      <div className="font-mono font-bold text-[#1F2937] dark:text-slate-100">
-                        {ev.usn}
-                      </div>
-                      <div className="text-[13px] text-[#64748B] dark:text-slate-400 mt-0.5">
-                        {ev.studentName} &middot; PC: <strong>{ev.pcNumber}</strong>
-                      </div>
-                    </td>
-                    <td className="py-4 px-5">
-                      <div className="font-bold text-[#B42318] dark:text-red-400">
-                        {ev.eventType}
-                      </div>
-                      <div className="text-[13px] font-mono text-[#64748B] dark:text-slate-400 mt-0.5">
-                        {ev.timestamp} ({ev.examinationCode})
-                      </div>
-                    </td>
-                    <td className="py-4 px-5">
-                      <StatusIndicator
-                        tone={ev.lockStatus.includes('Locked') ? 'danger' : 'info'}
-                        label={ev.lockStatus}
-                      />
-                    </td>
-                    <td className="py-4 px-5 text-sm text-[#64748B] dark:text-slate-300">
-                      {ev.invigilatorIdentity ? (
-                        <div>
-                          <div className="font-bold text-[#1F2937] dark:text-slate-200">
-                            {ev.invigilatorIdentity} ({ev.unlockTime})
-                          </div>
-                          {ev.unlockCredentialId && (
-                            <div className="text-xs font-mono text-[#2563EB] dark:text-blue-400 mt-0.5">
-                              Credential Ref: {ev.unlockCredentialId}
-                              {ev.unlockCredentialRevision
-                                ? ` (Rev ${ev.unlockCredentialRevision})`
-                                : ''}
-                            </div>
-                          )}
-                          <div className="text-[13px] mt-0.5">
-                            Reason: {ev.unlockReason}
-                          </div>
+            <div className="overflow-x-auto border border-[#D9E2EF] dark:border-[#334155] rounded-xl">
+              <table className="w-full text-left border-collapse text-sm">
+                <thead>
+                  <tr className="bg-[#F5F7FB] dark:bg-[#0F172A]/60 border-b border-[#D9E2EF] dark:border-[#334155] text-xs font-bold text-[#64748B] dark:text-slate-400 uppercase tracking-wider">
+                    <th className="py-4 px-5">Student USN &amp; PC</th>
+                    <th className="py-4 px-5">Event Type &amp; Timestamp</th>
+                    <th className="py-4 px-5">Lock Status</th>
+                    <th className="py-4 px-5">Invigilator Unlock Details</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#D9E2EF] dark:divide-[#334155]">
+                  {normalizedSuspiciousEvents.map((ev) => (
+                    <tr key={ev.id}>
+                      <td className="py-4 px-5">
+                        <div className="font-mono font-bold text-[#1F2937] dark:text-slate-100">
+                          {ev.usn}
                         </div>
-                      ) : (
-                        <span className="text-[#B42318] dark:text-red-400 font-semibold">
-                          Screen Locked — Awaiting Invigilator
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {activeSession.suspiciousEvents.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={4}
-                      className="py-10 text-center text-sm text-[#64748B] dark:text-slate-400"
-                    >
-                      No suspicious activity events recorded for this session.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                        <div className="text-[13px] text-[#64748B] dark:text-slate-400 mt-0.5">
+                          {ev.studentName} &middot; PC: <strong>{ev.pcNumber}</strong>
+                        </div>
+                      </td>
+                      <td className="py-4 px-5">
+                        <div className="font-bold text-[#B42318] dark:text-red-400">
+                          {ev.eventType}
+                        </div>
+                        <div className="text-[13px] font-mono text-[#64748B] dark:text-slate-400 mt-0.5">
+                          {ev.timestamp} ({ev.examinationCode})
+                        </div>
+                      </td>
+                      <td className="py-4 px-5">
+                        <StatusIndicator
+                          tone={ev.isLocked ? 'danger' : 'info'}
+                          label={ev.lockStatus}
+                        />
+                      </td>
+                      <td className="py-4 px-5 text-sm text-[#64748B] dark:text-slate-300">
+                        {ev.invigilatorIdentity ? (
+                          <div>
+                            <div className="font-bold text-[#1F2937] dark:text-slate-200">
+                              {ev.invigilatorIdentity} {ev.unlockTime ? `(${ev.unlockTime})` : ''}
+                            </div>
+                            {ev.unlockCredentialId && (
+                              <div className="text-xs font-mono text-[#2563EB] dark:text-blue-400 mt-0.5">
+                                Credential Ref: {ev.unlockCredentialId}
+                                {ev.unlockCredentialRevision
+                                  ? ` (Rev ${ev.unlockCredentialRevision})`
+                                  : ''}
+                              </div>
+                            )}
+                            {ev.unlockReason && (
+                              <div className="text-[13px] mt-0.5">
+                                Reason: {ev.unlockReason}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-[#B42318] dark:text-red-400 font-semibold">
+                            Screen Locked — Awaiting Invigilator
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {normalizedSuspiciousEvents.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={4}
+                        className="py-10 text-center text-sm text-[#64748B] dark:text-slate-400"
+                      >
+                        No suspicious activity events recorded for this session.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
+        </ErrorBoundary>
       )}
 
       {/* ========================================================================
           SECTION 4: INVIGILATOR-ASSISTED PC RECOVERY LOGS
          ======================================================================== */}
       {activeSection === 'pc-recovery' && (
-        <div className="bg-white dark:bg-[#1E293B] border border-[#D9E2EF] dark:border-[#334155] rounded-xl p-6 sm:p-7 shadow-xs space-y-6">
-          <div className="border-b border-[#D9E2EF] dark:border-[#334155] pb-5">
-            <h1 className="text-[26px] sm:text-[28px] font-bold text-[#1F2937] dark:text-slate-100 leading-tight flex items-center gap-3">
-              <Laptop className="w-7 h-7 text-[#6D5CE8]" />
-              Invigilator-Assisted PC Recovery Log
-            </h1>
-          </div>
+        <ErrorBoundary fallbackTitle="Unable to display PC Recovery Logs view">
+          <div className="bg-white dark:bg-[#1E293B] border border-[#D9E2EF] dark:border-[#334155] rounded-xl p-6 sm:p-7 shadow-xs space-y-6">
+            <div className="border-b border-[#D9E2EF] dark:border-[#334155] pb-5">
+              <h1 className="text-[26px] sm:text-[28px] font-bold text-[#1F2937] dark:text-slate-100 leading-tight flex items-center gap-3">
+                <Laptop className="w-7 h-7 text-[#6D5CE8]" />
+                Invigilator-Assisted PC Recovery Log
+              </h1>
+            </div>
 
-          <div className="overflow-x-auto border border-[#D9E2EF] dark:border-[#334155] rounded-xl">
-            <table className="w-full text-left border-collapse text-sm">
-              <thead>
-                <tr className="bg-[#F5F7FB] dark:bg-[#0F172A]/60 border-b border-[#D9E2EF] dark:border-[#334155] text-xs font-bold text-[#64748B] dark:text-slate-400 uppercase tracking-wider">
-                  <th className="py-4 px-5">Student &amp; Sitting</th>
-                  <th className="py-4 px-5">Original PC &rarr; Replacement PC</th>
-                  <th className="py-4 px-5">Authorised Operator &amp; Time</th>
-                  <th className="py-4 px-5">Recovery Status, Reason &amp; Preserved State</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#D9E2EF] dark:divide-[#334155]">
-                {activeSession.pcRecoveryEvents.map((rec) => (
-                  <tr key={rec.id}>
-                    <td className="py-4 px-5">
-                      <div className="font-bold text-[#1F2937] dark:text-slate-100">
-                        {rec.studentName}
-                      </div>
-                      <div className="font-mono text-xs font-semibold text-[#1F2937] dark:text-slate-200 mt-0.5">
-                        {rec.usn}
-                      </div>
-                      <div className="text-xs text-[#64748B] dark:text-slate-400 mt-0.5">
-                        {rec.examinationCode} &middot; {rec.sittingName}
-                      </div>
-                    </td>
-                    <td className="py-4 px-5">
-                      <div className="font-mono text-base">
-                        <span className="line-through text-[#B42318] dark:text-red-400">
-                          {rec.oldPcNumber}
-                        </span>{' '}
-                        &rarr;{' '}
-                        <span className="font-bold text-[#16834A] dark:text-emerald-400">
-                          {rec.newPcNumber}
-                        </span>
-                      </div>
-                      {rec.labId && (
-                        <div className="text-xs font-mono text-[#64748B] dark:text-slate-400 mt-1">
-                          Lab: {rec.labId}
-                        </div>
-                      )}
-                    </td>
-                    <td className="py-4 px-5">
-                      <div className="font-bold text-[#1F2937] dark:text-slate-200">
-                        {rec.invigilatorIdentity}
-                      </div>
-                      {rec.recoveryTokenId && (
-                        <div className="text-xs font-mono text-[#6D5CE8] dark:text-violet-400 mt-0.5">
-                          Recovery Ref: {rec.recoveryTokenId}
-                        </div>
-                      )}
-                      <div className="text-[13px] font-mono text-[#64748B] dark:text-slate-400 mt-0.5">
-                        {rec.timestamp}
-                      </div>
-                    </td>
-                    <td className="py-4 px-5 text-sm text-[#64748B] dark:text-slate-300">
-                      <div className="mb-1.5">
-                        <StatusIndicator
-                          tone="success"
-                          label="Recovered — Old PC Revoked"
-                        />
-                      </div>
-                      <div className="font-medium text-[#1F2937] dark:text-slate-200">
-                        {rec.reason}
-                      </div>
-                      <div className="text-[13px] text-[#16834A] dark:text-emerald-400 font-semibold mt-1">
-                        Saved Answers, Assigned Version &amp; Timer Preserved
-                      </div>
-                    </td>
+            <div className="overflow-x-auto border border-[#D9E2EF] dark:border-[#334155] rounded-xl">
+              <table className="w-full text-left border-collapse text-sm">
+                <thead>
+                  <tr className="bg-[#F5F7FB] dark:bg-[#0F172A]/60 border-b border-[#D9E2EF] dark:border-[#334155] text-xs font-bold text-[#64748B] dark:text-slate-400 uppercase tracking-wider">
+                    <th className="py-4 px-5">Student &amp; Sitting</th>
+                    <th className="py-4 px-5">Original PC &rarr; Replacement PC</th>
+                    <th className="py-4 px-5">Authorised Operator &amp; Time</th>
+                    <th className="py-4 px-5">Recovery Status, Reason &amp; Preserved State</th>
                   </tr>
-                ))}
-                {activeSession.pcRecoveryEvents.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={4}
-                      className="py-10 text-center text-sm text-[#64748B] dark:text-slate-400"
-                    >
-                      No PC recovery events recorded for this session.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-[#D9E2EF] dark:divide-[#334155]">
+                  {normalizedPcRecoveryEvents.map((rec) => (
+                    <tr key={rec.id}>
+                      <td className="py-4 px-5">
+                        <div className="font-bold text-[#1F2937] dark:text-slate-100">
+                          {rec.studentName}
+                        </div>
+                        <div className="font-mono text-xs font-semibold text-[#1F2937] dark:text-slate-200 mt-0.5">
+                          {rec.usn}
+                        </div>
+                        <div className="text-xs text-[#64748B] dark:text-slate-400 mt-0.5">
+                          {rec.examinationCode} &middot; {rec.sittingName}
+                        </div>
+                      </td>
+                      <td className="py-4 px-5">
+                        <div className="font-mono text-base">
+                          <span className="line-through text-[#B42318] dark:text-red-400">
+                            {rec.oldPcNumber}
+                          </span>{' '}
+                          &rarr;{' '}
+                          <span className="font-bold text-[#16834A] dark:text-emerald-400">
+                            {rec.newPcNumber}
+                          </span>
+                        </div>
+                        {rec.labId && (
+                          <div className="text-xs font-mono text-[#64748B] dark:text-slate-400 mt-1">
+                            Lab: {rec.labId}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-4 px-5">
+                        <div className="font-bold text-[#1F2937] dark:text-slate-200">
+                          {rec.invigilatorIdentity}
+                        </div>
+                        {rec.recoveryTokenId && (
+                          <div className="text-xs font-mono text-[#6D5CE8] dark:text-violet-400 mt-0.5">
+                            Recovery Ref: {rec.recoveryTokenId}
+                          </div>
+                        )}
+                        <div className="text-[13px] font-mono text-[#64748B] dark:text-slate-400 mt-0.5">
+                          {rec.timestamp}
+                        </div>
+                      </td>
+                      <td className="py-4 px-5 text-sm text-[#64748B] dark:text-slate-300">
+                        <div className="mb-1.5">
+                          <StatusIndicator
+                            tone="success"
+                            label="Recovered — Old PC Revoked"
+                          />
+                        </div>
+                        <div className="font-medium text-[#1F2937] dark:text-slate-200">
+                          {rec.reason}
+                        </div>
+                        <div className="text-[13px] text-[#16834A] dark:text-emerald-400 font-semibold mt-1">
+                          Saved Answers, Assigned Version &amp; Timer Preserved
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {normalizedPcRecoveryEvents.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={4}
+                        className="py-10 text-center text-sm text-[#64748B] dark:text-slate-400"
+                      >
+                        No PC recovery events recorded for this session.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
+        </ErrorBoundary>
       )}
     </div>
   );

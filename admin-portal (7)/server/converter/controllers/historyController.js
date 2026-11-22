@@ -1,6 +1,25 @@
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { db } from '../database/db.js';
 import { processDocumentConversion } from '../engine/conversionEngine.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function resolveExistingFilePath(record) {
+  if (!record) return null;
+  if (record.originalFilePath && fs.existsSync(record.originalFilePath)) {
+    return record.originalFilePath;
+  }
+  const fallbackDir = path.resolve(__dirname, '../../../uploads/originals');
+  const candidateName = record.storedFilename || (record.originalFilePath ? path.basename(record.originalFilePath) : null);
+  if (candidateName) {
+    const candidatePath = path.join(fallbackDir, candidateName);
+    if (fs.existsSync(candidatePath)) return candidatePath;
+  }
+  return null;
+}
 
 export function getConversionHistory(req, res) {
   try {
@@ -29,8 +48,9 @@ export function downloadOriginalDocument(req, res) {
   try {
     const { recordId } = req.params;
     const record = db.getConversionRecord(recordId);
+    const resolvedPath = resolveExistingFilePath(record);
 
-    if (!record || !record.originalFilePath || !fs.existsSync(record.originalFilePath)) {
+    if (!record || !resolvedPath) {
       return res.status(404).json({
         success: false,
         statusCode: 404,
@@ -38,7 +58,7 @@ export function downloadOriginalDocument(req, res) {
       });
     }
 
-    res.download(record.originalFilePath, record.originalFilename);
+    res.download(resolvedPath, record.originalFilename);
   } catch (err) {
     res.status(500).json({
       success: false,
@@ -52,8 +72,9 @@ export async function reprocessDocument(req, res) {
   try {
     const { recordId } = req.params;
     const record = db.getConversionRecord(recordId);
+    const resolvedPath = resolveExistingFilePath(record);
 
-    if (!record || !record.originalFilePath || !fs.existsSync(record.originalFilePath)) {
+    if (!record || !resolvedPath) {
       return res.status(404).json({
         success: false,
         statusCode: 404,
@@ -62,9 +83,9 @@ export async function reprocessDocument(req, res) {
     }
 
     const file = {
-      path: record.originalFilePath,
+      path: resolvedPath,
       originalname: record.originalFilename,
-      size: record.fileSize || fs.statSync(record.originalFilePath).size
+      size: record.fileSize || fs.statSync(resolvedPath).size
     };
 
     const result = await processDocumentConversion(file, {

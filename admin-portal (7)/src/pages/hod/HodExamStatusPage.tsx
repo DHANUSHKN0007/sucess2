@@ -72,6 +72,14 @@ export const HodExamStatusPage: React.FC = () => {
     void loadExaminations();
   }, [loadExaminations]);
 
+  useEffect(() => {
+    const handleSse = () => {
+      void loadExaminations();
+    };
+    window.addEventListener('campus-exam-event', handleSse);
+    return () => window.removeEventListener('campus-exam-event', handleSse);
+  }, [loadExaminations]);
+
   // Always display Semesters 1–8 in ascending numeric order via MASTER_SEMESTER_OPTIONS
 
   const filtered = useMemo(() => {

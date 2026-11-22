@@ -5,9 +5,50 @@ import {
   ResultImportAcknowledgement,
   SittingName,
 } from '../types/examination';
-import { apiClient } from './apiClient';
+import { apiClient, getApiConfig } from './apiClient';
 
 export const resultService = {
+  /**
+   * Finalizes and downloads the signed `.labresult` package directly from the Lab Server API.
+   */
+  async downloadResultPackageFromLabServer(
+    examinationId: string,
+    sittingName: SittingName | string
+  ): Promise<File> {
+    const normSitting = sittingName.toUpperCase().includes('AFTERNOON') || sittingName.toUpperCase().endsWith('-A')
+      ? 'AFTERNOON'
+      : 'MORNING';
+
+    const config = getApiConfig();
+    const labBase = config.labApiBaseUrl;
+
+    // 1. Trigger finalization to ensure package is generated and signed with the latest evaluations
+    try {
+      await fetch(`${labBase}/results/finalize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ examinationId, sittingCode: normSitting }),
+      });
+    } catch {
+      // Continue to download if already finalized
+    }
+
+    // 2. Download the binary .labresult archive
+    const downloadUrl = `${labBase}/results/download?examinationId=${encodeURIComponent(
+      examinationId
+    )}&sittingCode=${encodeURIComponent(normSitting)}`;
+    const res = await fetch(downloadUrl);
+    if (!res.ok) {
+      throw new Error(
+        `Lab Server returned HTTP ${res.status}: Unable to retrieve .labresult package. Ensure Lab Server is running on ${labBase}.`
+      );
+    }
+
+    const blob = await res.blob();
+    const fileName = `${examinationId}_${normSitting}.labresult`;
+    return new File([blob], fileName, { type: 'application/octet-stream' });
+  },
+
   async getExaminationResults(): Promise<ExaminationResultRecord[]> {
     const res = await apiClient.centralRequest<ExaminationResultRecord[]>(
       '/results/examinations',
@@ -40,10 +81,13 @@ export const resultService = {
       throw new Error('Select a .labresult package file to verify.');
     }
 
+    const normSitting = sittingName.toUpperCase().includes('AFTERNOON') || sittingName.toUpperCase().endsWith('-A')
+      ? 'AFTERNOON'
+      : 'MORNING';
     const formData = new FormData();
     formData.append('file', file, file.name);
     formData.append('examinationId', examinationId);
-    formData.append('sittingName', sittingName);
+    formData.append('sittingName', normSitting);
 
     const res = await apiClient.centralUploadRequest<FileVerificationReport>(
       '/results/verify-upload',
@@ -70,11 +114,15 @@ export const resultService = {
       throw new Error('This result package has already been imported.');
     }
 
+    const rawSitting = (report as { sittingCode?: string; sittingName?: string }).sittingCode || report.sittingName || '';
+    const normSitting = rawSitting.toUpperCase().includes('AFTERNOON')
+      ? 'AFTERNOON'
+      : 'MORNING';
     const formData = new FormData();
     formData.append('file', file, file.name);
     formData.append('examinationId', report.examinationId);
     formData.append('sittingId', report.sessionId);
-    formData.append('sittingName', report.sittingName);
+    formData.append('sittingName', normSitting);
     formData.append('packageId', report.packageId || '');
     formData.append('packageRevision', String(report.packageRevision ?? 1));
 

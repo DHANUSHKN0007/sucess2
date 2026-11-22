@@ -2,7 +2,8 @@ export type ExamAvailabilityState =
   | 'NOT_STARTED'
   | 'ACTIVE'
   | 'COMPLETED'
-  | 'UNAUTHORIZED';
+  | 'UNAUTHORIZED'
+  | 'SCHEDULED_WAITING';
 
 export type PaperVersion = 'A' | 'B' | 'C' | 'D';
 
@@ -61,6 +62,8 @@ export interface ExaminationSessionInfo {
   startTime: string;
   endTime: string;
   sessionSlot: string;
+  sittingName?: string;
+  sittingCode?: string;
   durationMinutes: number;
   totalQuestions: number;
   totalMarks: number;

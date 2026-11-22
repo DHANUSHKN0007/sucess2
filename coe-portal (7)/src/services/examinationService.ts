@@ -217,11 +217,16 @@ export function findConflictingBookingForLab(
   allExaminations: ScheduledExamination[],
   excludeExamId?: string,
   excludeSittingName?: SittingName,
-  siblingSlot?: BusyLabSlot | null
+  siblingSlot?: BusyLabSlot | null,
+  candidateCount: number = 0,
+  labCapacity: number = 60
 ): string | null {
   if (!examDate || !startTime || !durationMinutes || durationMinutes <= 0) {
     return null;
   }
+
+  let totalBooked = 0;
+  const overlappingDetails: string[] = [];
 
   if (
     siblingSlot &&
@@ -234,10 +239,14 @@ export function findConflictingBookingForLab(
       siblingSlot.durationMinutes
     )
   ) {
-    return `${siblingSlot.label || 'Other sitting'} (${formatMinutesAsRange(
-      siblingSlot.startTime,
-      siblingSlot.durationMinutes
-    )})`;
+    const sibCount = (siblingSlot as any).studentCount || 0;
+    totalBooked += sibCount;
+    overlappingDetails.push(
+      `${siblingSlot.label || 'Other sitting'} (${formatMinutesAsRange(
+        siblingSlot.startTime,
+        siblingSlot.durationMinutes
+      )})`
+    );
   }
 
   for (const otherExam of allExaminations) {
@@ -254,8 +263,9 @@ export function findConflictingBookingForLab(
       }
 
       const otherDate = otherSit.examDate || otherExam.examDate;
+      const otherLab = otherSit.labId || (otherSit as any).assignedLab;
       if (
-        otherSit.labId === labId &&
+        otherLab === labId &&
         otherDate === examDate &&
         doTimeIntervalsOverlap(
           startTime,
@@ -264,11 +274,22 @@ export function findConflictingBookingForLab(
           otherSit.durationMinutes
         )
       ) {
-        return `${otherExam.examCode} (${otherExam.subjectName} — ${
-          otherSit.sittingName
-        }, ${formatMinutesAsRange(otherSit.startTime, otherSit.durationMinutes)})`;
+        const count = otherSit.assignedStudentUsns?.length || (otherSit as any).studentCount || 0;
+        totalBooked += count;
+        overlappingDetails.push(
+          `${otherExam.examCode} (${otherExam.subjectName} — ${
+            otherSit.sittingName
+          }, ${formatMinutesAsRange(otherSit.startTime, otherSit.durationMinutes)})`
+        );
       }
     }
+  }
+
+  // Capacity-aware: only conflict if total booked + requested candidate count exceeds lab capacity
+  if (totalBooked + candidateCount > labCapacity) {
+    return `${labId} capacity exceeded: ${totalBooked}/${labCapacity} seats booked by ${overlappingDetails.join(
+      ', '
+    )}`;
   }
 
   return null;
@@ -282,10 +303,13 @@ export function getAvailableLaboratories(
   allExaminations: ScheduledExamination[],
   excludeExamId?: string,
   excludeSittingName?: SittingName,
-  siblingSlot?: BusyLabSlot | null
+  siblingSlot?: BusyLabSlot | null,
+  requiredSeats: number = 0
 ): LabServerNode[] {
-  return labServers.filter(
-    (lab) =>
+  return labServers.filter((lab) => {
+    if (((lab as any).status || 'ACTIVE') === 'INACTIVE') return false;
+    const capacity = lab.capacity || 60;
+    return (
       findConflictingBookingForLab(
         lab.id,
         examDate,
@@ -294,9 +318,12 @@ export function getAvailableLaboratories(
         allExaminations,
         excludeExamId,
         excludeSittingName,
-        siblingSlot
+        siblingSlot,
+        requiredSeats,
+        capacity
       ) === null
-  );
+    );
+  });
 }
 
 export function computeSittingConfigFingerprint(

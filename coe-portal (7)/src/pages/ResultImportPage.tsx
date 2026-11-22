@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   AlertCircle,
   CheckCircle2,
+  Download,
   FileArchive,
   FileCheck2,
   FileUp,
@@ -147,6 +148,7 @@ export const ResultImportPage: React.FC = () => {
   const [isDragActive, setIsDragActive] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [fetchingFromLab, setFetchingFromLab] = useState(false);
   const [verificationReport, setVerificationReport] =
     useState<FileVerificationReport | null>(null);
   const [importAcknowledgement, setImportAcknowledgement] =
@@ -206,6 +208,37 @@ export const ResultImportPage: React.FC = () => {
     setIsDragActive(false);
     const file = e.dataTransfer.files?.[0];
     acceptSelectedFile(file);
+  };
+
+  const handleFetchFromLabServer = async () => {
+    if (!selectedExam || !selectedSittingObj) return;
+    setFetchingFromLab(true);
+    setFileValidationError(null);
+    try {
+      notify(
+        'info',
+        'Contacting Lab Server',
+        `Finalizing sitting and downloading result package for ${selectedSittingObj.sittingName}...`
+      );
+      const file = await resultService.downloadResultPackageFromLabServer(
+        selectedExam.id,
+        selectedSittingObj.sittingName
+      );
+      acceptSelectedFile(file);
+      notify(
+        'success',
+        'Result Package Received',
+        `Retrieved ${file.name} (${formatFileSize(file.size)}) directly from Lab Server.`
+      );
+    } catch (err) {
+      notify(
+        'error',
+        'Fetch from Lab Server Failed',
+        err instanceof Error ? err.message : 'Failed to retrieve package from Lab Server.'
+      );
+    } finally {
+      setFetchingFromLab(false);
+    }
   };
 
   const handleVerifyResultFile = async () => {
@@ -548,12 +581,32 @@ export const ResultImportPage: React.FC = () => {
           <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
             <button
               type="button"
-              disabled={!selectedExam || !selectedSittingObj || verifying || importing}
+              disabled={!selectedExam || !selectedSittingObj || verifying || importing || fetchingFromLab}
+              onClick={handleFetchFromLabServer}
+              className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-[#059669] hover:bg-emerald-700 disabled:opacity-40 rounded-lg cursor-pointer shadow-xs"
+              title="Download signed .labresult package directly from connected Lab Server over LAN"
+            >
+              {fetchingFromLab ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Fetching from Lab Server...
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4" />
+                  Fetch from Connected Lab Server
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              disabled={!selectedExam || !selectedSittingObj || verifying || importing || fetchingFromLab}
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-[#2563EB] hover:bg-blue-700 disabled:opacity-40 rounded-lg cursor-pointer"
+              className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white bg-[#2563EB] hover:bg-blue-700 disabled:opacity-40 rounded-lg cursor-pointer shadow-xs"
             >
               <FileUp className="w-4 h-4" />
-              Choose File
+              Choose File (.labresult)
             </button>
 
             {uploadedFile && (

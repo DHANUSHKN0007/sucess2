@@ -131,12 +131,22 @@ const ROUTE_TITLES: Record<string, { section: string; title: string }> = {
 };
 
 export const COEPortalLayout: React.FC = () => {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1280);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [confirmLogoutOpen, setConfirmLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+
+  React.useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth < 1280) {
+        setCollapsed(true);
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   const {
     authSession,
@@ -346,7 +356,9 @@ export const COEPortalLayout: React.FC = () => {
     (rawSectionParam === 'student-eligibility' ||
       rawSectionParam === 'sitting-allocation')
       ? 'sitting-arrangements'
-      : rawSectionParam;
+      : location.pathname === '/monitoring' && rawSectionParam === 'unlocks'
+        ? 'suspicious-activity'
+        : rawSectionParam;
   const activeSecondarySection = secondaryNav
     ? normalizedSectionParam || secondaryNav.defaultSection
     : null;
@@ -682,7 +694,7 @@ export const COEPortalLayout: React.FC = () => {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top Bar with Breadcrumb & Authenticated Account Dropdown */}
         <header className="sticky top-0 z-20 bg-white dark:bg-slate-900 border-b border-[#D9E2EF] dark:border-slate-800 px-6 py-4 flex items-center justify-between gap-6">
-          <div className="flex items-center gap-2.5 text-sm text-[#64748B] dark:text-slate-400 truncate">
+          <div className="flex items-center gap-2.5 text-sm text-[#64748B] dark:text-slate-400 min-w-0 overflow-hidden">
             <span className="font-bold text-[#17243A] dark:text-slate-200 whitespace-nowrap">
               COE Portal
             </span>

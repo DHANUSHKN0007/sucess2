@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ExaminationSessionInfo,
   ServerAnswerRecord,
@@ -13,7 +13,7 @@ import {
   SecurityLockState,
   SecurityViolationType,
 } from '../types/security';
-import { securityService } from '../services/securityService';
+import { AttemptScope, securityService } from '../services/securityService';
 
 interface UseExaminationSecurityProps {
   enabled: boolean;
@@ -34,9 +34,25 @@ export function useExaminationSecurity({
   responses,
   jumpToQuestionIndex,
 }: UseExaminationSecurityProps) {
-  const [lockState, setLockState] = useState<SecurityLockState>(() =>
-    securityService.getLockState()
+  const attemptScope: AttemptScope = useMemo(
+    () => ({
+      studentUsn: student?.usn,
+      examinationId: examSession?.examinationId,
+      sittingName: examSession?.sessionSlot || examSession?.sittingName,
+    }),
+    [student?.usn, examSession?.examinationId, examSession?.sessionSlot, examSession?.sittingName]
   );
+
+  const [lockState, setLockState] = useState<SecurityLockState>(() =>
+    securityService.getLockState(attemptScope)
+  );
+
+  useEffect(() => {
+    if (student?.usn && examSession?.examinationId) {
+      setLockState(securityService.getLockState(attemptScope));
+    }
+  }, [attemptScope, student?.usn, examSession?.examinationId]);
+
   const [isVerifying, setIsVerifying] = useState(false);
   const [verificationError, setVerificationError] = useState<string | null>(null);
   const [resumptionMessage, setResumptionMessage] = useState<string | null>(null);
@@ -108,6 +124,7 @@ export function useExaminationSecurity({
         studentUsn: curStudent.usn,
         studentName: curStudent.fullName,
         examinationId: curSession.examinationId,
+        sittingName: curSession.sessionSlot || curSession.sittingName,
         currentQuestionIndex: curQIndex,
         remainingSeconds: curRemSecs,
         answeredCount,
@@ -345,9 +362,17 @@ export function useExaminationSecurity({
         studentUsn: student.usn,
         studentName: student.fullName,
         examinationId: examSession.examinationId,
+        sittingName: examSession.sessionSlot || examSession.sittingName,
       });
 
       setLockState(result.state);
+
+      if (!result.success) {
+        setVerificationError(result.message);
+        setIsVerifying(false);
+        return false;
+      }
+
       setResumptionMessage(result.message);
 
       // Return candidate to exact saved question
@@ -369,7 +394,7 @@ export function useExaminationSecurity({
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Authorization failed.';
       setVerificationError(msg);
-      setLockState(securityService.getLockState());
+      setLockState(securityService.getLockState(attemptScope));
       setIsVerifying(false);
       return false;
     }

@@ -70,6 +70,14 @@ export const DepartmentResultsPage: React.FC = () => {
     loadResults();
   }, [loadResults]);
 
+  useEffect(() => {
+    const handleSse = () => {
+      loadResults();
+    };
+    window.addEventListener('campus-exam-event', handleSse);
+    return () => window.removeEventListener('campus-exam-event', handleSse);
+  }, [loadResults]);
+
   const analytics = useMemo(
     () => analyticsService.computeDepartmentAnalytics(data?.results || []),
     [data?.results]

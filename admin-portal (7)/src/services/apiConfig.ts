@@ -2,8 +2,22 @@ const metaEnv =
   (typeof import.meta !== 'undefined' && import.meta.env) ||
   ({} as Record<string, string | undefined>);
 
+let defaultHost = '127.0.0.1';
+if (
+  typeof window !== 'undefined' &&
+  window.location &&
+  window.location.hostname &&
+  window.location.hostname !== 'localhost' &&
+  window.location.hostname !== '127.0.0.1'
+) {
+  defaultHost = window.location.hostname;
+}
+
 const envUrl = metaEnv.VITE_API_BASE_URL;
-const resolvedUrl = (envUrl && !envUrl.includes(':8080') ? envUrl : 'http://127.0.0.1:8081/api/v1').trim();
+let resolvedUrl = (envUrl && !envUrl.includes(':8080') ? envUrl : `http://${defaultHost}:8081/api/v1`).trim();
+if (defaultHost !== '127.0.0.1' && defaultHost !== 'localhost') {
+  resolvedUrl = resolvedUrl.replace(/127\.0\.0\.1|localhost/, defaultHost);
+}
 
 export const API_CONFIG = {
   baseUrl: resolvedUrl.replace(/\/+$/, ''),

@@ -60,11 +60,28 @@ export class ApiClient {
   private errorInterceptors: ErrorInterceptor[] = [];
 
   constructor() {
-    const rawUrl =
-      (typeof import.meta !== 'undefined' &&
-        (import.meta.env?.VITE_API_URL || import.meta.env?.VITE_LAB_API_BASE_URL)) ||
-      '';
-    this.baseUrl = (rawUrl && !rawUrl.includes(':8080') ? rawUrl : 'http://127.0.0.1:8082').replace(/\/+$/, '');
+    let resolvedUrl = '';
+
+    if (typeof window !== 'undefined') {
+      const winEnv = (window as any).__ENV__;
+      const storedUrl = localStorage.getItem('mitm_lab_api_url');
+      if (winEnv?.VITE_LAB_API_BASE_URL) {
+        resolvedUrl = winEnv.VITE_LAB_API_BASE_URL;
+      } else if (winEnv?.VITE_API_URL) {
+        resolvedUrl = winEnv.VITE_API_URL;
+      } else if (storedUrl) {
+        resolvedUrl = storedUrl;
+      } else if (window.location && window.location.hostname && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        // Automatically connect to the physical Lab Server running on the host machine serving this portal
+        resolvedUrl = `http://${window.location.hostname}:8082`;
+      }
+    }
+
+    if (!resolvedUrl && typeof import.meta !== 'undefined') {
+      resolvedUrl = import.meta.env?.VITE_LAB_API_BASE_URL || import.meta.env?.VITE_API_URL || '';
+    }
+
+    this.baseUrl = (resolvedUrl && !resolvedUrl.includes(':8080') ? resolvedUrl : 'http://127.0.0.1:8082').replace(/\/+$/, '');
 
     this.defaultTimeoutMs = Number(
       (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_TIMEOUT_MS) || 8000
@@ -198,7 +215,7 @@ export class ApiClient {
       }
 
       if (!response.ok) {
-        let errorData: { message?: string; code?: string; details?: unknown } = {};
+        let errorData: { message?: string; error?: string; code?: string; errorCode?: string; details?: unknown } = {};
         try {
           errorData = await response.json();
         } catch {
@@ -217,10 +234,13 @@ export class ApiClient {
           defaultMessage = 'The Lab Server encountered an internal error. Please notify the lab invigilator.';
         }
 
+        const serverMessage = errorData.error || errorData.message;
+        const serverCode = errorData.errorCode || errorData.code;
+
         const apiError = new ApiClientError(
-          errorData.message || defaultMessage,
+          serverMessage || defaultMessage,
           statusCode,
-          errorData.code || `HTTP_${statusCode}`,
+          serverCode || `HTTP_${statusCode}`,
           false,
           false,
           errorData.details

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import {
   ChevronLeft,
@@ -14,6 +14,8 @@ import {
 import { InstitutionLogo } from '../components/InstitutionLogo';
 import { AccountMenu } from '../components/AccountMenu';
 import { ErrorBoundary } from '../components/ErrorBoundary';
+import { realtimeService } from '../services/realtimeService';
+import { getAuthToken } from '../services/apiClient';
 
 const PRINCIPAL_NAV_ITEMS = [
   { label: 'Dashboard', to: '/admin/principal/dashboard', icon: LayoutDashboard },
@@ -30,6 +32,12 @@ export const PrincipalLayout: React.FC = () => {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    const token = getAuthToken() || undefined;
+    realtimeService.connect(token);
+    return () => realtimeService.disconnect();
+  }, []);
 
   const isNavActive = (to: string) => location.pathname === to;
 

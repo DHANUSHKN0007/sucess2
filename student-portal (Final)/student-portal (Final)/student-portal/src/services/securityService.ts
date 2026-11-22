@@ -11,8 +11,25 @@ import {
 } from '../types/security';
 import { apiClient } from '../api/client';
 
-export const INVIGILATOR_SECRET_PASSWORD = 'MIT@CBT2026';
+export const INVIGILATOR_SECRET_PASSWORD = ''; // Deprecated: Authoritative COE-generated credential verification only
 export const MAX_INVIGILATOR_ATTEMPTS = 3;
+
+export interface AttemptScope {
+  studentUsn?: string;
+  examinationId?: string;
+  sittingName?: string;
+}
+
+export function buildSecurityLockStateKey(scope?: AttemptScope): string | null {
+  if (!scope || !scope.studentUsn || !scope.examinationId) {
+    return null;
+  }
+  const cleanUsn = scope.studentUsn.trim().toUpperCase();
+  const cleanExamId = scope.examinationId.trim();
+  const rawSitting = scope.sittingName || 'SESSION';
+  const cleanSitting = rawSitting.trim().toUpperCase().replace(/[\s\-_]+/g, '_');
+  return `mitm_cbt_security_lock_${cleanExamId}_${cleanSitting}_${cleanUsn}`;
+}
 
 const SECURITY_LOCK_STATE_KEY = 'mitm_cbt_security_lock_state_v1';
 const SECURITY_AUDIT_LOGS_KEY = 'mitm_cbt_security_audit_logs_v1';
@@ -28,14 +45,20 @@ const INITIAL_LOCK_STATE: SecurityLockState = {
   resumptionCount: 0,
   lastResumedAt: null,
   savedQuestionIndex: 0,
-  savedRemainingSeconds: 2700,
+  savedRemainingSeconds: 7200,
   savedAnswerCount: 0,
 };
 
 export const securityService = {
-  getLockState(): SecurityLockState {
+  getLockState(scope?: AttemptScope): SecurityLockState {
     try {
-      const raw = localStorage.getItem(SECURITY_LOCK_STATE_KEY);
+      // Clean up deprecated unscoped storage key to prevent stale lock leaks across exams
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(SECURITY_LOCK_STATE_KEY);
+      }
+      const key = buildSecurityLockStateKey(scope);
+      if (!key) return { ...INITIAL_LOCK_STATE };
+      const raw = localStorage.getItem(key);
       if (!raw) return { ...INITIAL_LOCK_STATE };
       return JSON.parse(raw) as SecurityLockState;
     } catch {
@@ -43,9 +66,15 @@ export const securityService = {
     }
   },
 
-  saveLockState(state: SecurityLockState): void {
+  saveLockState(state: SecurityLockState, scope?: AttemptScope): void {
     try {
-      localStorage.setItem(SECURITY_LOCK_STATE_KEY, JSON.stringify(state));
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(SECURITY_LOCK_STATE_KEY);
+      }
+      const key = buildSecurityLockStateKey(scope);
+      if (key) {
+        localStorage.setItem(key, JSON.stringify(state));
+      }
     } catch {
       // Ignore quota issues
     }
@@ -58,11 +87,17 @@ export const securityService = {
     studentUsn: string;
     studentName: string;
     examinationId: string;
+    sittingName?: string;
     currentQuestionIndex: number;
     remainingSeconds: number;
     answeredCount: number;
   }): SecurityLockState {
-    const current = this.getLockState();
+    const scope: AttemptScope = {
+      studentUsn: params.studentUsn,
+      examinationId: params.examinationId,
+      sittingName: params.sittingName,
+    };
+    const current = this.getLockState(scope);
 
     if (current.isLocked) {
       return current;
@@ -101,7 +136,7 @@ export const securityService = {
       savedAnswerCount: params.answeredCount,
     };
 
-    this.saveLockState(updatedState);
+    this.saveLockState(updatedState, scope);
 
     // Record Event 1: Malpractice / Violation Detected
     this.addAuditLog({
@@ -124,6 +159,7 @@ export const securityService = {
         description: params.description,
         studentUsn: params.studentUsn,
         examinationId: params.examinationId,
+        sittingName: params.sittingName,
         currentQuestionIndex: params.currentQuestionIndex,
         remainingSeconds: params.remainingSeconds,
         answeredCount: params.answeredCount,
@@ -140,8 +176,14 @@ export const securityService = {
     studentUsn: string;
     studentName: string;
     examinationId: string;
+    sittingName?: string;
   }): Promise<{ success: boolean; message: string; state: SecurityLockState }> {
-    const current = this.getLockState();
+    const scope: AttemptScope = {
+      studentUsn: params.studentUsn,
+      examinationId: params.examinationId,
+      sittingName: params.sittingName,
+    };
+    const current = this.getLockState(scope);
 
     if (!current.isLocked) {
       return {
@@ -162,103 +204,111 @@ export const securityService = {
       throw new Error('Please enter the invigilator authorization password.');
     }
 
-    // Attempt authoritative backend verification first
+    // Authoritative backend verification against Lab Server
     try {
       const serverResponse = await apiClient.post<{
         success: boolean;
         message: string;
-        state: SecurityLockState;
+        state?: SecurityLockState;
+        failedAttempts?: number;
+        isPermanentlyLocked?: boolean;
       }>('/api/security/unlock', {
         enteredPassword: trimmedPassword,
         studentUsn: params.studentUsn,
         examinationId: params.examinationId,
+        sittingName: params.sittingName,
       });
 
-      if (serverResponse.success) {
-        this.saveLockState(serverResponse.state);
-        return serverResponse;
+      if (serverResponse.success && serverResponse.state) {
+        this.saveLockState(serverResponse.state, scope);
+        this.addAuditLog({
+          studentUsn: params.studentUsn,
+          studentName: params.studentName,
+          examinationId: params.examinationId,
+          event: 'Invigilator password entered',
+          status: 'Successful',
+          details: serverResponse.message || 'Valid invigilator authorization password entered by proctor. Session unlocked.',
+          attemptNumber: current.failedAttempts + 1,
+          questionNumberAtEvent: current.savedQuestionIndex + 1,
+          remainingSecondsAtEvent: current.savedRemainingSeconds,
+        });
+        return {
+          success: true,
+          message: serverResponse.message || 'Session unlocked successfully.',
+          state: serverResponse.state,
+        };
+      } else {
+        const newFailed = serverResponse.failedAttempts ?? (current.failedAttempts + 1);
+        const isNowPermanent = serverResponse.isPermanentlyLocked ?? (newFailed >= MAX_INVIGILATOR_ATTEMPTS);
+        const updatedState: SecurityLockState = {
+          ...current,
+          failedAttempts: newFailed,
+          isPermanentlyLocked: isNowPermanent,
+        };
+        this.saveLockState(updatedState, scope);
+        this.addAuditLog({
+          studentUsn: params.studentUsn,
+          studentName: params.studentName,
+          examinationId: params.examinationId,
+          event: 'Invigilator password attempt failed',
+          status: isNowPermanent ? 'Permanent Lock' : 'Failed',
+          details: serverResponse.message || `Invalid password entered (Attempt ${newFailed}/${MAX_INVIGILATOR_ATTEMPTS}).`,
+          attemptNumber: newFailed,
+          questionNumberAtEvent: current.savedQuestionIndex + 1,
+          remainingSecondsAtEvent: current.savedRemainingSeconds,
+        });
+        return {
+          success: false,
+          message: serverResponse.message || `Invalid invigilator password. ${Math.max(0, MAX_INVIGILATOR_ATTEMPTS - newFailed)} attempt(s) remaining.`,
+          state: updatedState,
+        };
       }
-    } catch {
-      // Backend is unreachable; fallback to secure local offline verification
-    }
+    } catch (err: any) {
+      // Differentiate network errors / timeouts from actual credential rejection
+      const isNetwork =
+        Boolean(err?.isNetworkError) ||
+        Boolean(err?.isTimeout) ||
+        err?.statusCode === 0 ||
+        err?.name === 'TypeError' ||
+        (typeof err?.message === 'string' &&
+          (err.message.toLowerCase().includes('network') ||
+            err.message.toLowerCase().includes('connect') ||
+            err.message.toLowerCase().includes('timed out') ||
+            err.message.toLowerCase().includes('reach')));
 
-    // Local fallback verification
-    const isMatch = trimmedPassword === INVIGILATOR_SECRET_PASSWORD;
-    const now = new Date();
-    const formattedTime = now.toLocaleString('en-IN', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: true,
-    });
+      if (isNetwork) {
+        // Network failures MUST NOT increment failedAttempts or permanently lock students
+        return {
+          success: false,
+          message:
+            err?.message ||
+            'Network connection error while contacting Lab Server. Attempt not counted. Please check connection and try again.',
+          state: current,
+        };
+      }
 
-    if (isMatch) {
-      const updatedState: SecurityLockState = {
-        ...current,
-        isLocked: false,
-        violation: null,
-        failedAttempts: 0,
-        isPermanentlyLocked: false,
-        resumptionCount: current.resumptionCount + 1,
-        lastResumedAt: formattedTime,
-      };
-
-      this.saveLockState(updatedState);
-
-      this.addAuditLog({
-        studentUsn: params.studentUsn,
-        studentName: params.studentName,
-        examinationId: params.examinationId,
-        event: 'Invigilator password entered',
-        status: 'Successful',
-        details: 'Valid invigilator authorization password entered by proctor. Session unlocked.',
-        attemptNumber: current.failedAttempts + 1,
-        questionNumberAtEvent: current.savedQuestionIndex + 1,
-        remainingSecondsAtEvent: current.savedRemainingSeconds,
-      });
-
-      return {
-        success: true,
-        message: 'Invigilator verification successful. Your examination session has been restored.',
-        state: updatedState,
-      };
-    } else {
       const newFailed = current.failedAttempts + 1;
       const isNowPermanent = newFailed >= MAX_INVIGILATOR_ATTEMPTS;
-
       const updatedState: SecurityLockState = {
         ...current,
         failedAttempts: newFailed,
         isPermanentlyLocked: isNowPermanent,
       };
-
-      this.saveLockState(updatedState);
-
+      this.saveLockState(updatedState, scope);
       this.addAuditLog({
         studentUsn: params.studentUsn,
         studentName: params.studentName,
         examinationId: params.examinationId,
         event: 'Invigilator password attempt failed',
         status: isNowPermanent ? 'Permanent Lock' : 'Failed',
-        details: isNowPermanent
-          ? 'Failed authorization attempt #3. Session permanently locked. Administrative override required.'
-          : `Invalid password entered (Attempt ${newFailed}/${MAX_INVIGILATOR_ATTEMPTS}).`,
+        details: err?.message || 'Invalid invigilator authorization password.',
         attemptNumber: newFailed,
         questionNumberAtEvent: current.savedQuestionIndex + 1,
         remainingSecondsAtEvent: current.savedRemainingSeconds,
       });
-
-      const remainingAttempts = MAX_INVIGILATOR_ATTEMPTS - newFailed;
-      const message = isNowPermanent
-        ? 'Maximum invigilator attempts exceeded (3/3). This workstation is permanently locked. Contact Chief Invigilator.'
-        : `Invalid invigilator password. ${remainingAttempts} attempt${remainingAttempts === 1 ? '' : 's'} remaining before permanent lockdown.`;
-
       return {
         success: false,
-        message,
+        message: err?.message || `Invalid invigilator password. ${Math.max(0, MAX_INVIGILATOR_ATTEMPTS - newFailed)} attempt(s) remaining.`,
         state: updatedState,
       };
     }

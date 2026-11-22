@@ -113,16 +113,39 @@ export function validateUsnInput(rawUsn: string): string | null {
   return null;
 }
 
+export function normalizeDobInput(rawDob: string): string {
+  const trimmed = rawDob.trim();
+  if (!trimmed) return '';
+  // Support DD-MM-YYYY or DD/MM/YYYY
+  if (/^\d{1,2}[-/]\d{1,2}[-/]\d{4}$/.test(trimmed)) {
+    const parts = trimmed.split(/[-/]/);
+    const d = parts[0].padStart(2, '0');
+    const m = parts[1].padStart(2, '0');
+    const y = parts[2];
+    return `${y}-${m}-${d}`;
+  }
+  // Support YYYY/MM/DD
+  if (/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(trimmed)) {
+    const parts = trimmed.split('/');
+    const y = parts[0];
+    const m = parts[1].padStart(2, '0');
+    const d = parts[2].padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return trimmed;
+}
+
 export function validateDobInput(rawDob: string): string | null {
   const trimmed = rawDob.trim();
   if (!trimmed) {
     return 'Date of Birth is required for roster verification.';
   }
+  const normalized = normalizeDobInput(trimmed);
   const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-  if (!dateRegex.test(trimmed)) {
-    return 'Enter Date of Birth in YYYY-MM-DD format.';
+  if (!dateRegex.test(normalized)) {
+    return 'Enter Date of Birth in YYYY-MM-DD or DD-MM-YYYY format.';
   }
-  const parsed = new Date(trimmed);
+  const parsed = new Date(normalized);
   if (Number.isNaN(parsed.getTime())) {
     return 'Enter a valid calendar Date of Birth.';
   }

@@ -44,8 +44,20 @@ export function getApiConfig(): ApiClientConfig {
   const metaEnv =
     (typeof import.meta !== 'undefined' && import.meta.env) ||
     ({} as Record<string, string | undefined>);
-  const centralRaw = (metaEnv.VITE_API_BASE_URL && !metaEnv.VITE_API_BASE_URL.includes(':8080') ? metaEnv.VITE_API_BASE_URL : 'http://127.0.0.1:8081/api/v1').trim();
-  const labRaw = (metaEnv.VITE_LAB_API_BASE_URL && !metaEnv.VITE_LAB_API_BASE_URL.includes(':8080') && !metaEnv.VITE_LAB_API_BASE_URL.includes(':8443') ? metaEnv.VITE_LAB_API_BASE_URL : 'http://127.0.0.1:8082/lab-api').trim();
+
+  let winCentral: string | undefined;
+  let winLab: string | undefined;
+  if (typeof window !== 'undefined') {
+    const winEnv = (window as any).__ENV__;
+    winCentral = winEnv?.VITE_API_BASE_URL;
+    winLab = winEnv?.VITE_LAB_API_BASE_URL;
+    if (!winCentral && window.location && window.location.hostname && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      winCentral = `http://${window.location.hostname}:8081/api/v1`;
+    }
+  }
+
+  const centralRaw = (winCentral || (metaEnv.VITE_API_BASE_URL && !metaEnv.VITE_API_BASE_URL.includes(':8080') ? metaEnv.VITE_API_BASE_URL : 'http://127.0.0.1:8081/api/v1')).trim();
+  const labRaw = (winLab || (metaEnv.VITE_LAB_API_BASE_URL && !metaEnv.VITE_LAB_API_BASE_URL.includes(':8080') && !metaEnv.VITE_LAB_API_BASE_URL.includes(':8443') ? metaEnv.VITE_LAB_API_BASE_URL : 'http://127.0.0.1:8082/lab-api')).trim();
 
   return {
     centralApiBaseUrl: centralRaw.replace(/\/+$/, ''),

@@ -47,6 +47,14 @@ export const HodDashboardPage: React.FC = () => {
     void loadDashboard();
   }, [loadDashboard]);
 
+  useEffect(() => {
+    const handleSse = () => {
+      void loadDashboard();
+    };
+    window.addEventListener('campus-exam-event', handleSse);
+    return () => window.removeEventListener('campus-exam-event', handleSse);
+  }, [loadDashboard]);
+
   if (loading) {
     return (
       <div className="space-y-6 animate-pulse">

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import {
   Award,
@@ -19,6 +19,8 @@ import { AccountMenu } from '../components/AccountMenu';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { HodSemesterProvider, useHodSemester } from '../hooks/useHodSemester';
 import { useAuth } from '../hooks/useAuth';
+import { realtimeService } from '../services/realtimeService';
+import { getAuthToken } from '../services/apiClient';
 
 const HOD_NAV_ITEMS = [
   { label: 'Dashboard', to: '/admin/hod/dashboard', icon: LayoutDashboard, syncSemester: false },
@@ -41,6 +43,12 @@ const HodLayoutShell: React.FC = () => {
   const { selectedSemester } = useHodSemester();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    const token = getAuthToken() || undefined;
+    realtimeService.connect(token);
+    return () => realtimeService.disconnect();
+  }, []);
 
   const isNavActive = (to: string) => location.pathname === to;
   const resolveNavTarget = (item: (typeof HOD_NAV_ITEMS)[number]) =>

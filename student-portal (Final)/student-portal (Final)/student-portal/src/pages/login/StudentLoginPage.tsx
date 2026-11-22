@@ -5,6 +5,7 @@ import { InstitutionHeader } from '../../components/layout/InstitutionHeader';
 import { DualModeDobInput } from '../../components/common/DualModeDobInput';
 import { useExamSession } from '../../hooks/useExamSession';
 import {
+  normalizeDobInput,
   validateDobInput,
   validateUsnInput,
 } from '../../utils/examFormatters';
@@ -136,9 +137,10 @@ export const StudentLoginPage: React.FC = () => {
     setIsLoading(true);
     try {
       const normalizedUsn = trimmedUsn.toUpperCase();
+      const normalizedDob = normalizeDobInput(rawDob);
       await loginStudent({
         usn: normalizedUsn,
-        dateOfBirth: rawDob,
+        dateOfBirth: normalizedDob,
       });
 
       // Check if student has an authorized recovery pending
@@ -187,7 +189,7 @@ export const StudentLoginPage: React.FC = () => {
 
       {/* Shared Institutional Header - Blue Banner Theme */}
       <div className="relative z-10">
-        <InstitutionHeader systemId={clientSystemId} theme="blue" />
+        <InstitutionHeader systemId={clientSystemId} theme="blue" hideLanIndicator={true} />
       </div>
 
       {/* Main Content: Single Centered Student Login Card */}
@@ -343,7 +345,6 @@ export const StudentLoginPage: React.FC = () => {
             >
               Invigilator / Recovery Login
             </Link>
-            <span>Offline LAN Mode · Protected Environment</span>
           </div>
         </div>
       </footer>

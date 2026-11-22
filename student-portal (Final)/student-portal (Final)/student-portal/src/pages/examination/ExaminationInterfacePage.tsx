@@ -138,7 +138,7 @@ export const ExaminationInterfacePage: React.FC = () => {
   }
 
   return (
-    <div className="h-[100dvh] max-h-[100dvh] bg-[#F7F9FC] flex flex-col justify-between relative overflow-hidden select-none font-sans text-[#243247]">
+    <div className="min-h-screen lg:h-[100dvh] lg:max-h-[100dvh] bg-[#F7F9FC] flex flex-col justify-between relative overflow-x-hidden select-none font-sans text-[#243247]">
       {/* Resumption Confirmation Toast */}
       {resumptionMessage && (
         <div
@@ -242,7 +242,7 @@ export const ExaminationInterfacePage: React.FC = () => {
           </div>
         </main>
       ) : (
-        <main className="flex-1 max-w-[1400px] w-full mx-auto px-3 sm:px-6 py-2 sm:py-2.5 flex flex-col lg:flex-row gap-3 sm:gap-3.5 items-stretch min-h-0 overflow-y-auto lg:overflow-hidden">
+        <main className="flex-1 max-w-[1400px] w-full mx-auto px-3 sm:px-6 py-2 sm:py-2.5 flex flex-col lg:flex-row gap-3 sm:gap-3.5 items-stretch min-h-0 overflow-y-auto">
         {/* AREA B: QUESTION WORKSPACE */}
         <section
           aria-label="Examination Question Workspace"
@@ -254,25 +254,17 @@ export const ExaminationInterfacePage: React.FC = () => {
               <span className="font-bold text-[#102A43] text-[16px]">
                 Question {formatDisplayNumber(currentQuestion.displayNumber)}
               </span>
-              <span className="text-xs px-2.5 py-0.5 rounded-[6px] bg-[#F7F9FC] border border-[#DCE3EC] text-[#2463B5] font-semibold">
-                Module {currentQuestion.moduleNumber}
-              </span>
               <span className="text-xs px-2 py-0.5 rounded-[4px] bg-blue-50 border border-blue-200 font-mono font-bold text-[#2463B5]">
                 {examSession.subjectCode}
               </span>
               <span className="text-xs font-semibold text-[#102A43] hidden sm:inline">
                 {examSession.subjectName}
               </span>
-              {currentQuestion.moduleTitle && (
-                <span className="text-xs text-[#64748B] hidden md:inline">
-                  · {currentQuestion.moduleTitle}
-                </span>
-              )}
             </div>
 
             <div className="flex items-center gap-2.5 text-xs font-mono">
               <span className="text-[#243247] bg-[#F7F9FC] px-2 py-0.5 rounded-[6px] border border-[#DCE3EC]">
-                +{examSession.marksPerCorrect} Mark
+                +1 mark
               </span>
               {examSession.negativeMarkingPerWrong > 0 ? (
                 <span className="text-[#B42318] bg-red-50 px-2 py-0.5 rounded-[6px] border border-red-200">

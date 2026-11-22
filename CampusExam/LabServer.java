@@ -45,6 +45,8 @@ public final class LabServer {
     public static Path STORAGE_DIR = Path.of("lab_storage", "packages");
     public static Path SUBMISSIONS_DIR = Path.of("lab_storage", "submissions");
     public static Path RESULTS_DIR = Path.of("lab_storage", "results");
+    public static Path CREDENTIALS_DIR = Path.of("lab_storage", "credentials");
+    public static Path CREDENTIALS_FILE = CREDENTIALS_DIR.resolve("sitting_unlock_verifiers.json");
 
     // Cryptographic keys held by Lab Server
     public static PrivateKey labPrivateKey;
@@ -52,7 +54,24 @@ public final class LabServer {
     public static PublicKey centralPublicKey;
 
     // Active in-memory offline runtime
+    public static final class CohortState {
+        public long examinationId;
+        public String sittingName;
+        public String labId;
+        public Map<String, Object> sessionMetadata = new ConcurrentHashMap<>();
+        public Map<String, Map<String, Object>> versions = new ConcurrentHashMap<>();
+        public Map<String, Integer> answerKeys = new ConcurrentHashMap<>();
+        public Map<String, Map<String, Object>> roster = new ConcurrentHashMap<>(); // usn -> student details
+        public Map<String, String> studentAssignedVersion = new ConcurrentHashMap<>(); // usn -> version
+        public Map<String, Object> packageDoc = new ConcurrentHashMap<>();
+    }
+
     public static final class RuntimeState {
+        // Multi-cohort registry for simultaneous multi-department examinations
+        public static Map<Long, CohortState> activeCohorts = new ConcurrentHashMap<>(); // examinationId -> CohortState
+        public static Map<String, Long> usnToCohortMap = new ConcurrentHashMap<>(); // usn -> examinationId
+
+        // Active session tracking (backward-compatible defaults to most recent cohort)
         public static Long activeSessionId = null;
         public static String activeSittingName = null;
         public static Map<String, Object> sessionMetadata = new ConcurrentHashMap<>();
@@ -67,6 +86,7 @@ public final class LabServer {
         public static Map<String, Long> studentSubmissions = new ConcurrentHashMap<>(); // subKey -> timestamp
         public static Map<String, Map<String, Object>> studentReceipts = new ConcurrentHashMap<>(); // subKey -> receipt
         public static Map<String, Map<String, Object>> studentLockStates = new ConcurrentHashMap<>(); // usn -> lockState
+        public static Map<String, Map<String, Object>> sittingUnlockVerifiers = new ConcurrentHashMap<>(); // examId:sitting -> verifier
         public static Map<String, Integer> loginFailureCounts = new ConcurrentHashMap<>(); // usn -> count
         public static Map<String, Long> loginLockoutUntil = new ConcurrentHashMap<>(); // usn -> timestamp
 
@@ -93,21 +113,34 @@ public final class LabServer {
         if (customKeys != null && !customKeys.isBlank()) KEYS_DIR = Path.of(customKeys);
 
         String customStorage = System.getenv("LAB_STORAGE_DIR");
-        if (customStorage != null && !customStorage.isBlank()) STORAGE_DIR = Path.of(customStorage);
+        if (customStorage != null && !customStorage.isBlank()) {
+            STORAGE_DIR = Path.of(customStorage);
+            if (STORAGE_DIR.getParent() != null) {
+                CREDENTIALS_DIR = STORAGE_DIR.getParent().resolve("credentials");
+                CREDENTIALS_FILE = CREDENTIALS_DIR.resolve("sitting_unlock_verifiers.json");
+            }
+        }
 
         Files.createDirectories(KEYS_DIR);
         Files.createDirectories(STORAGE_DIR);
         Files.createDirectories(SUBMISSIONS_DIR);
         Files.createDirectories(RESULTS_DIR);
+        Files.createDirectories(CREDENTIALS_DIR);
 
         // 1. Cryptographic Initialization & Isolation Verification
         initCrypto();
+
+        if (args.length > 0 && "--init-keys".equals(args[0])) {
+            System.out.println("[LabServer] Cryptographic keys verified and initialized successfully.");
+            return;
+        }
 
         // 2. Load any locally stored offline packages
         loadPersistedPackages();
 
         // 3. Load locally stored active sessions, answers and submissions for restart recovery
         loadPersistedSubmissions();
+        loadPersistedUnlockVerifiers();
 
         // 4. Background Executor for Expiry Processing
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -123,8 +156,22 @@ public final class LabServer {
         server.createContext("/api/", LabServer::handleRequest);
         server.createContext("/health", LabServer::handleHealth);
         server.createContext("/", LabServer::handleRequest);
-        server.setExecutor(Executors.newFixedThreadPool(32));
+        server.setExecutor(Executors.newCachedThreadPool());
         server.start();
+
+        Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "sse-heartbeat-thread");
+            t.setDaemon(true);
+            return t;
+        }).scheduleAtFixedRate(() -> {
+            List<SseClient> dead = new ArrayList<>();
+            for (SseClient c : sseClients) {
+                if (!c.sendComment("heartbeat")) {
+                    dead.add(c);
+                }
+            }
+            sseClients.removeAll(dead);
+        }, 15, 15, TimeUnit.SECONDS);
 
         System.out.println("[LabServer] Server initialized on http://" + BIND + ":" + PORT);
         System.out.println("[LabServer] Lab ID: " + LAB_ID);
@@ -172,7 +219,15 @@ public final class LabServer {
             centralPublicKey = kf.generatePublic(new X509EncodedKeySpec(cpubBytes));
             System.out.println("[LabCrypto] Loaded Central RSA Public Key from " + centralPubPath.toAbsolutePath());
         } else {
-            System.err.println("[LabCrypto WARNING] central_public.key not found at " + centralPubPath.toAbsolutePath());
+            Path altCentralPub = Path.of(System.getenv().getOrDefault("CENTRAL_KEYS_DIR", "keys"), "central_public.key");
+            if (Files.exists(altCentralPub)) {
+                Files.copy(altCentralPub, centralPubPath, StandardCopyOption.REPLACE_EXISTING);
+                byte[] cpubBytes = Files.readAllBytes(centralPubPath);
+                centralPublicKey = kf.generatePublic(new X509EncodedKeySpec(cpubBytes));
+                System.out.println("[LabCrypto] Auto-imported Central RSA Public Key from " + altCentralPub.toAbsolutePath());
+            } else {
+                System.err.println("[LabCrypto WARNING] central_public.key not found at " + centralPubPath.toAbsolutePath());
+            }
         }
 
         System.out.println("[LabCrypto] Cryptographic isolation confirmed: Lab Server possesses lab_private.key, does NOT possess central_private.key.");
@@ -234,19 +289,60 @@ public final class LabServer {
                 });
             }
 
-            // Activate primary package into memory (prefer session 20 or first valid package)
+            // Activate primary package into memory (prefer package matching current time window today, or highest examId)
             Map<String, Object> primary = null;
+            String todayStr = LocalDate.now().toString();
+            long nowMs = System.currentTimeMillis();
             for (Map<String, Object> doc : RuntimeState.packages.values()) {
-                if (parseLongSafe(doc.get("examinationId")) == 20L) {
-                    primary = doc;
-                    break;
+                Map<String, Object> pl = (Map<String, Object>) doc.getOrDefault("payload", doc);
+                String eDate = String.valueOf(pl.getOrDefault("examDate", pl.getOrDefault("scheduledDate", "")));
+                if (todayStr.equals(eDate)) {
+                    String sTime = String.valueOf(pl.getOrDefault("startTime", "09:30:00"));
+                    int dur = (int) parseLongSafe(pl.getOrDefault("durationMinutes", 90));
+                    long sMs = calculateScheduledStartMs(eDate, sTime);
+                    long eMs = calculateScheduledEndMs(eDate, resolveEndTime(sTime, pl.get("endTime"), dur), sTime, dur);
+                    if (nowMs >= sMs - 15 * 60 * 1000L && nowMs < eMs) {
+                        long eid = parseLongSafe(doc.getOrDefault("examinationId", pl.getOrDefault("sessionId", pl.get("examinationId"))));
+                        if (primary == null || eid > parseLongSafe(primary.getOrDefault("examinationId", ((Map<?, ?>) primary.getOrDefault("payload", primary)).get("sessionId")))) {
+                            primary = doc;
+                        }
+                    }
                 }
             }
-            if (primary == null && !RuntimeState.packages.isEmpty()) {
-                primary = RuntimeState.packages.values().iterator().next();
+            if (primary == null) {
+                long maxEid = -1;
+                for (Map<String, Object> doc : RuntimeState.packages.values()) {
+                    Map<String, Object> pl = (Map<String, Object>) doc.getOrDefault("payload", doc);
+                    String eDate = String.valueOf(pl.getOrDefault("examDate", pl.getOrDefault("scheduledDate", "")));
+                    if (todayStr.equals(eDate)) {
+                        long eid = parseLongSafe(doc.getOrDefault("examinationId", pl.getOrDefault("sessionId", pl.get("examinationId"))));
+                        if (eid > maxEid) {
+                            maxEid = eid;
+                            primary = doc;
+                        }
+                    }
+                }
+            }
+            if (primary == null) {
+                for (Map<String, Object> doc : RuntimeState.packages.values()) {
+                    if (parseLongSafe(doc.get("examinationId")) == 20L) {
+                        primary = doc;
+                        break;
+                    }
+                }
+            }
+            // Restore non-finalized stored packages into active multi-cohort memory
+            for (Map<String, Object> doc : RuntimeState.packages.values()) {
+                long docEid = parseLongSafe(doc.getOrDefault("examinationId", doc.get("sessionId")));
+                String docSit = String.valueOf(doc.getOrDefault("sittingCode", doc.getOrDefault("sitting", "MORNING"))).toUpperCase(Locale.ROOT);
+                Path resFile = RESULTS_DIR.resolve(docEid + "_" + docSit + ".labresult");
+                if (!Files.exists(resFile)) {
+                    activatePackageIntoMemory(doc);
+                }
             }
             if (primary != null) {
-                activatePackageIntoMemory(primary);
+                RuntimeState.activeSessionId = parseLongSafe(primary.getOrDefault("examinationId", primary.get("sessionId")));
+                RuntimeState.activeSittingName = (String) primary.getOrDefault("sittingCode", primary.get("sitting"));
             }
         } catch (Exception ex) {
             System.err.println("[LabStorage] Error scanning storage directory: " + ex.getMessage());
@@ -294,10 +390,10 @@ public final class LabServer {
                                 }
                             }
                         } else if (fileName.endsWith("_security.json")) {
-                            String usn = fileName.substring(0, fileName.indexOf("_security.json")).toUpperCase(Locale.ROOT);
+                            String baseKey = fileName.substring(0, fileName.indexOf("_security.json")).toUpperCase(Locale.ROOT);
                             String content = Files.readString(p, StandardCharsets.UTF_8);
                             Map<String, Object> lock = (Map<String, Object>) Json.parse(content);
-                            RuntimeState.studentLockStates.put(usn, new ConcurrentHashMap<>(lock));
+                            RuntimeState.studentLockStates.put(baseKey, new ConcurrentHashMap<>(lock));
                         } else if (fileName.equals("recovery_transfers.json")) {
                             String content = Files.readString(p, StandardCharsets.UTF_8);
                             Object parsed = Json.parse(content);
@@ -347,35 +443,36 @@ public final class LabServer {
     }
 
     @SuppressWarnings("unchecked")
-    private static void activatePackageIntoMemory(Map<String, Object> doc) {
+    private static synchronized void activatePackageIntoMemory(Map<String, Object> doc) {
         try {
-            RuntimeState.roster.clear();
-            RuntimeState.studentAssignedVersion.clear();
-            RuntimeState.versions.clear();
-            RuntimeState.answerKeys.clear();
-
             Object examIdObj = doc.get("examinationId");
-            if (examIdObj != null) {
-                RuntimeState.activeSessionId = parseLongSafe(examIdObj);
-            }
-            RuntimeState.activeSittingName = (String) doc.get("sittingCode");
+            long examId = parseLongSafe(examIdObj);
+            String sittingName = (String) doc.get("sittingCode");
 
             Map<String, Object> payload = (Map<String, Object>) doc.get("payload");
             if (payload == null) payload = doc;
 
-            if (RuntimeState.activeSessionId == null || RuntimeState.activeSessionId == 0L) {
-                RuntimeState.activeSessionId = parseLongSafe(payload.getOrDefault("sessionId", payload.get("examinationId")));
+            if (examId == 0L) {
+                examId = parseLongSafe(payload.getOrDefault("sessionId", payload.get("examinationId")));
             }
-            if (RuntimeState.activeSittingName == null || RuntimeState.activeSittingName.isBlank()) {
-                RuntimeState.activeSittingName = (String) payload.getOrDefault("sittingCode", payload.getOrDefault("sitting", "MORNING"));
+            if (sittingName == null || sittingName.isBlank()) {
+                sittingName = (String) payload.getOrDefault("sittingCode", payload.getOrDefault("sitting", "MORNING"));
             }
+            if (sittingName == null) sittingName = "MORNING";
+            sittingName = sittingName.trim().toUpperCase(Locale.ROOT);
 
-            RuntimeState.sessionMetadata = payload;
+            CohortState cohort = RuntimeState.activeCohorts.computeIfAbsent(examId, k -> new CohortState());
+            cohort.examinationId = examId;
+            cohort.sittingName = sittingName;
+            cohort.packageDoc = doc;
+            cohort.sessionMetadata.putAll(payload);
 
             Map<String, Object> versionsMap = (Map<String, Object>) payload.get("versions");
             if (versionsMap != null) {
                 for (Map.Entry<String, Object> e : versionsMap.entrySet()) {
-                    RuntimeState.versions.put(e.getKey(), Map.of("questions", e.getValue()));
+                    Map<String, Object> vDoc = Map.of("questions", e.getValue());
+                    cohort.versions.put(e.getKey(), vDoc);
+                    RuntimeState.versions.put(e.getKey(), vDoc);
                 }
             }
 
@@ -383,7 +480,9 @@ public final class LabServer {
             if (answersMap != null) {
                 for (Map.Entry<String, Object> e : answersMap.entrySet()) {
                     try {
-                        RuntimeState.answerKeys.put(e.getKey(), Integer.parseInt(String.valueOf(e.getValue())));
+                        int ak = Integer.parseInt(String.valueOf(e.getValue()));
+                        cohort.answerKeys.put(e.getKey(), ak);
+                        RuntimeState.answerKeys.put(e.getKey(), ak);
                     } catch (Exception ignored) {}
                 }
             }
@@ -394,17 +493,38 @@ public final class LabServer {
                     if (item instanceof Map<?, ?> sm) {
                         String usn = (String) sm.get("usn");
                         if (usn != null) {
+                            String normUsn = usn.trim().toUpperCase(Locale.ROOT);
                             Map<String, Object> m = new LinkedHashMap<>();
                             sm.forEach((k, v) -> m.put(String.valueOf(k), v));
-                            RuntimeState.roster.put(usn.toUpperCase(Locale.ROOT), m);
+                            cohort.roster.put(normUsn, m);
+                            RuntimeState.roster.put(normUsn, m);
+                            RuntimeState.usnToCohortMap.put(normUsn, examId);
                             String assignedVer = (String) m.get("assignedVersion");
                             if (assignedVer != null) {
-                                RuntimeState.studentAssignedVersion.put(usn.toUpperCase(Locale.ROOT), assignedVer);
+                                cohort.studentAssignedVersion.put(normUsn, assignedVer);
+                                RuntimeState.studentAssignedVersion.put(normUsn, assignedVer);
                             }
                         }
                     }
                 }
             }
+
+            // Register sitting unlock verifier if embedded in package payload
+            if (payload.containsKey("sessionUnlockVerifier")) {
+                Object vObj = payload.get("sessionUnlockVerifier");
+                if (vObj instanceof Map<?, ?> vm) {
+                    Map<String, Object> verMap = new LinkedHashMap<>();
+                    vm.forEach((k, v) -> verMap.put(String.valueOf(k), v));
+                    RuntimeState.sittingUnlockVerifiers.put(examId + ":" + sittingName, verMap);
+                }
+            }
+
+            // Set backward-compatible activeSessionId to latest activated cohort
+            RuntimeState.activeSessionId = examId;
+            RuntimeState.activeSittingName = sittingName;
+            RuntimeState.sessionMetadata = payload;
+
+            System.out.println("[LabServer] Cohort #" + examId + " (" + sittingName + ") activated into memory. Roster size: " + cohort.roster.size() + ", Total active cohorts: " + RuntimeState.activeCohorts.size());
         } catch (Exception ex) {
             System.err.println("[LabServer] Activation into memory failed: " + ex.getMessage());
         }
@@ -425,6 +545,8 @@ public final class LabServer {
         resp.put("port", PORT);
         resp.put("activeSessionId", RuntimeState.activeSessionId);
         resp.put("activeSitting", RuntimeState.activeSittingName);
+        resp.put("activeCohortsCount", RuntimeState.activeCohorts.size());
+        resp.put("activeCohorts", RuntimeState.activeCohorts.keySet());
         resp.put("packagesLoaded", RuntimeState.packages.size());
         resp.put("rosterCount", RuntimeState.roster.size());
         resp.put("submissionsCount", RuntimeState.studentSubmissions.size());
@@ -519,6 +641,9 @@ public final class LabServer {
             resp.put("port", PORT);
             resp.put("packagesLoaded", RuntimeState.packages.size());
             resp.put("activeSessionId", RuntimeState.activeSessionId);
+            resp.put("activeSitting", RuntimeState.activeSittingName);
+            resp.put("activeCohortsCount", RuntimeState.activeCohorts.size());
+            resp.put("activeCohorts", RuntimeState.activeCohorts.keySet());
             resp.put("offlineReady", true);
             return Json.stringify(resp);
         }
@@ -562,7 +687,7 @@ public final class LabServer {
         }
 
         // 5. Student Offline Examination Endpoints
-        if (normPath.equals("student/login") && "POST".equals(method)) {
+        if ((normPath.equals("student/login") || normPath.equals("auth/student-login")) && "POST".equals(method)) {
             return handleStudentLogin(exchange, form);
         }
 
@@ -602,6 +727,14 @@ public final class LabServer {
             return handleSecurityUnlock(exchange, form);
         }
 
+        if ((normPath.equals("lab-api/sittings/unlock-credential/revoke") || normPath.endsWith("/unlock-credential/revoke")) && "POST".equals(method)) {
+            return handleRevokeUnlockCredential(exchange, form);
+        }
+
+        if ((normPath.equals("lab-api/sittings/unlock-credential") || normPath.equals("api/security/provision-unlock-credential") || normPath.endsWith("/unlock-credential")) && "POST".equals(method)) {
+            return handleProvisionUnlockCredential(exchange, form);
+        }
+
         if (normPath.equals("student/exam/submit") && "POST".equals(method)) {
             return handleStudentSubmit(exchange, form);
         }
@@ -614,6 +747,11 @@ public final class LabServer {
         // --- PHASE 9: LIVE MONITORING TELEMETRY ---
         if ((normPath.equals("monitoring/sessions") || normPath.startsWith("monitoring/sessions/")) && "GET".equals(method)) {
             return handleMonitoringSessions(exchange, normPath);
+        }
+
+        // --- PHASE 9: LIVE MONITORING STREAM (SSE) ---
+        if ((normPath.equals("monitoring/stream") || normPath.equals("monitoring/events") || normPath.equals("lab-api/monitoring/stream") || normPath.equals("api/v1/monitoring/events")) && "GET".equals(method)) {
+            return handleMonitoringStream(exchange);
         }
 
         // --- PHASE 9: LAB INSTRUCTOR AUTHENTICATION ---
@@ -658,7 +796,7 @@ public final class LabServer {
         if (normPath.matches("monitoring/sessions/[^/]+/unlock-event") && "POST".equals(method)) {
             return handleRecordUnlockEvent(exchange, form);
         }
-        if ((normPath.equals("packages/activate") || normPath.equals("test/activate-package")) && "POST".equals(method)) {
+        if ((normPath.equals("packages/activate") || normPath.equals("package/activate") || normPath.equals("test/activate-package")) && "POST".equals(method)) {
             return handlePackageActivate(exchange, form);
         }
 
@@ -675,6 +813,9 @@ public final class LabServer {
 
         // Test helper endpoint to clear student attempt (for automated test cleanup only)
         if (normPath.equals("test/reset-submissions") && "POST".equals(method)) {
+            RuntimeState.activeCohorts.clear();
+            RuntimeState.usnToCohortMap.clear();
+            RuntimeState.packages.clear();
             RuntimeState.studentSubmissions.clear();
             RuntimeState.studentAnswers.clear();
             RuntimeState.studentLockStates.clear();
@@ -686,7 +827,39 @@ public final class LabServer {
             RuntimeState.recoveryAuditLogs.clear();
             RuntimeState.suspiciousEvents.clear();
             RuntimeState.pcRecoveryEvents.clear();
+            try (var stream = Files.list(STORAGE_DIR)) {
+                for (Path p : stream.toList()) {
+                    String fn = p.getFileName().toString();
+                    if (fn.startsWith("4MH26SY") && fn.endsWith(".json")) {
+                        Files.deleteIfExists(p);
+                    }
+                }
+            } catch (Exception ignored) {}
             return Json.stringify(Map.of("success", true, "message", "Test submissions and recovery state cleared"));
+        }
+
+        if (normPath.equals("test/inject-ambiguity") && "POST".equals(method)) {
+            String usn = String.valueOf(form.getOrDefault("usn", "")).trim().toUpperCase(Locale.ROOT);
+            long targetEid = parseLongSafe(form.get("targetEid"));
+            CohortState cs = RuntimeState.activeCohorts.get(targetEid);
+            if (cs != null && !usn.isBlank()) {
+                Map<String, Object> sm = new LinkedHashMap<>();
+                sm.put("usn", usn);
+                sm.put("dob", "2006-01-25");
+                sm.put("fullName", "Ambiguity Test Student");
+                cs.roster.put(usn, sm);
+            }
+            return Json.stringify(Map.of("success", true, "message", "Ambiguity injected for " + usn));
+        }
+
+        if (normPath.equals("test/remove-ambiguity") && "POST".equals(method)) {
+            String usn = String.valueOf(form.getOrDefault("usn", "")).trim().toUpperCase(Locale.ROOT);
+            long targetEid = parseLongSafe(form.get("targetEid"));
+            CohortState cs = RuntimeState.activeCohorts.get(targetEid);
+            if (cs != null && !usn.isBlank()) {
+                cs.roster.remove(usn);
+            }
+            return Json.stringify(Map.of("success", true, "message", "Ambiguity removed for " + usn));
         }
 
         if (normPath.equals("test/expire-session") && "POST".equals(method)) {
@@ -908,9 +1081,18 @@ public final class LabServer {
             if (simTimeHdr != null && !simTimeHdr.isBlank()) {
                 try { return Long.parseLong(simTimeHdr.trim()); } catch (Exception ignored) {}
             }
+            String effTimeHdr = exchange.getRequestHeaders().getFirst("X-Effective-Time-Ms");
+            if (effTimeHdr != null && !effTimeHdr.isBlank()) {
+                try { return Long.parseLong(effTimeHdr.trim()); } catch (Exception ignored) {}
+            }
         }
-        if (form != null && form.containsKey("simulatedTimestampMs")) {
-            return parseLongSafe(form.get("simulatedTimestampMs"));
+        if (form != null) {
+            if (form.containsKey("simulatedTimestampMs")) {
+                return parseLongSafe(form.get("simulatedTimestampMs"));
+            }
+            if (form.containsKey("effectiveTimeMs")) {
+                return parseLongSafe(form.get("effectiveTimeMs"));
+            }
         }
         return System.currentTimeMillis();
     }
@@ -964,6 +1146,31 @@ public final class LabServer {
         return 1;
     }
 
+    private static String normalizeDateString(String raw) {
+        if (raw == null) return "";
+        String s = raw.trim();
+        if (s.isEmpty()) return "";
+        try {
+            // YYYY-MM-DD or YYYY/MM/DD
+            if (s.matches("^\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}$")) {
+                String[] parts = s.split("[-/]");
+                int y = Integer.parseInt(parts[0]);
+                int m = Integer.parseInt(parts[1]);
+                int d = Integer.parseInt(parts[2]);
+                return String.format(Locale.ROOT, "%04d-%02d-%02d", y, m, d);
+            }
+            // DD-MM-YYYY or DD/MM/YYYY
+            if (s.matches("^\\d{1,2}[-/]\\d{1,2}[-/]\\d{4}$")) {
+                String[] parts = s.split("[-/]");
+                int d = Integer.parseInt(parts[0]);
+                int m = Integer.parseInt(parts[1]);
+                int y = Integer.parseInt(parts[2]);
+                return String.format(Locale.ROOT, "%04d-%02d-%02d", y, m, d);
+            }
+        } catch (Exception ignored) {}
+        return s;
+    }
+
     // --- STUDENT OFFLINE EXAMINATION LOGIC ---
     @SuppressWarnings("unchecked")
     private static String handleStudentLogin(HttpExchange exchange, Map<String, Object> form) throws Exception {
@@ -982,24 +1189,40 @@ public final class LabServer {
             throw new LabException(429, "Too many failed login attempts. Workstation temporarily rate-limited for " + secLeft + " seconds.", "RATE_LIMITED");
         }
 
-        // 2. Validate Against Frozen Roster
-        Map<String, Object> student = RuntimeState.roster.get(usn);
-        if (student == null) {
-            Map<String, Object> bestPkg = null;
-            long bestEid = -1;
-            for (Map<String, Object> pkg : RuntimeState.packages.values()) {
-                Map<String, Object> pPayload = (Map<String, Object>) pkg.get("payload");
-                if (pPayload == null) pPayload = pkg;
-                Object rObj = pPayload.get("roster");
-                if (rObj instanceof List<?> list) {
-                    for (Object it : list) {
-                        if (it instanceof Map<?, ?> sm) {
-                            String rUsn = (String) sm.get("usn");
-                            if (usn.equalsIgnoreCase(rUsn)) {
-                                long curEid = parseLongSafe(pkg.get("examinationId"));
-                                if (curEid > bestEid) {
-                                    bestEid = curEid;
-                                    bestPkg = pkg;
+        // 2. Locate Candidate across all Active Cohorts or Stored Sitting Packages
+        List<CohortState> candidateCohorts = new ArrayList<>();
+        Map<String, Object> student = null;
+
+        for (CohortState cs : RuntimeState.activeCohorts.values()) {
+            if (cs.roster.containsKey(usn)) {
+                candidateCohorts.add(cs);
+                student = cs.roster.get(usn);
+            }
+        }
+
+        // If candidate not yet in activeCohorts, search stored packages and dynamically register (skip completed/finalized exams)
+        if (candidateCohorts.isEmpty()) {
+            for (Map<String, Object> pkgDoc : RuntimeState.packages.values()) {
+                Map<String, Object> payload = (Map<String, Object>) pkgDoc.get("payload");
+                if (payload == null) payload = pkgDoc;
+
+                long pEid = parseLongSafe(pkgDoc.getOrDefault("examinationId", payload.getOrDefault("sessionId", payload.get("examinationId"))));
+                String pSit = String.valueOf(pkgDoc.getOrDefault("sittingCode", payload.getOrDefault("sittingCode", payload.getOrDefault("sitting", "MORNING")))).toUpperCase(Locale.ROOT);
+                if (Files.exists(RESULTS_DIR.resolve(pEid + "_" + pSit + ".labresult"))) {
+                    continue; // Examination has already been finalized/exported
+                }
+
+                Object rosterObj = payload.get("roster");
+                if (rosterObj instanceof List<?> list) {
+                    for (Object item : list) {
+                        if (item instanceof Map<?, ?> sm) {
+                            String rUsn = String.valueOf(sm.get("usn")).trim().toUpperCase(Locale.ROOT);
+                            if (rUsn.equals(usn)) {
+                                activatePackageIntoMemory(pkgDoc);
+                                CohortState regCohort = RuntimeState.activeCohorts.get(pEid);
+                                if (regCohort != null) {
+                                    candidateCohorts.add(regCohort);
+                                    student = regCohort.roster.get(usn);
                                 }
                                 break;
                             }
@@ -1007,62 +1230,149 @@ public final class LabServer {
                     }
                 }
             }
-            if (bestPkg != null) {
-                activatePackageIntoMemory(bestPkg);
-                student = RuntimeState.roster.get(usn);
-            }
-        }
-        if (student == null) {
-            recordLoginFailure(usn, now);
-            throw new LabException(401, "Student " + usn + " not allocated to this Lab examination sitting.", "STUDENT_NOT_ALLOCATED");
         }
 
-        // 3. Verify DOB (Without logging plaintext DOB)
+        if (candidateCohorts.isEmpty() || student == null) {
+            recordLoginFailure(usn, now);
+            throw new LabException(401, "Invalid credentials: Student USN (" + usn + ") or Date of Birth is incorrect, or student is not allocated to any scheduled examination sitting in this laboratory.", "INVALID_CREDENTIALS");
+        }
+
+        // Decision 4: Ambiguity check - reject if student matches multiple simultaneously active cohorts
+        if (candidateCohorts.size() > 1) {
+            List<Long> matchingIds = candidateCohorts.stream().map(c -> c.examinationId).toList();
+            Map<String, Object> auditEntry = new LinkedHashMap<>();
+            auditEntry.put("auditId", "AUD-AMB-" + UUID.randomUUID().toString().substring(0, 8));
+            auditEntry.put("studentUsn", usn);
+            auditEntry.put("action", "AMBIGUOUS_STUDENT_COHORT_LOGIN");
+            auditEntry.put("reason", "Student USN " + usn + " matches multiple active cohorts: " + matchingIds);
+            auditEntry.put("timestamp", Instant.now().toString());
+            RuntimeState.recoveryAuditLogs.add(auditEntry);
+            throw new LabException(409, "Ambiguous examination allocation: Student USN " + usn + " is registered in multiple active examinations (" + matchingIds + "). Contact examination administrator.", "AMBIGUOUS_ALLOCATION");
+        }
+
+        CohortState targetCohort = candidateCohorts.get(0);
+        long candExamId = targetCohort.examinationId;
+        Map<String, Object> targetMeta = targetCohort.sessionMetadata;
+
+        // 3. Verify DOB (Without logging plaintext DOB, generic error message to avoid disclosure)
         String expectedDob = String.valueOf(student.get("dob"));
-        boolean validAuth = expectedDob.equals(dob) || "MITPRO@2587".equals(dob) || dob.replace("-", "").equals(expectedDob.replace("-", ""));
+        String normDob = normalizeDateString(dob);
+        String normExpected = normalizeDateString(expectedDob);
+        boolean validAuth = normExpected.equals(normDob) || expectedDob.equals(dob) || dob.replace("-", "").equals(expectedDob.replace("-", ""));
         if (!validAuth) {
             recordLoginFailure(usn, now);
-            throw new LabException(401, "Invalid Date of Birth for USN " + usn, "INVALID_DOB");
+            throw new LabException(401, "Invalid credentials: Student USN or Date of Birth is incorrect, or student is not allocated to this scheduled examination sitting.", "INVALID_CREDENTIALS");
         }
 
-        // Clear failures on successful login
+        // Clear failures on successful credential verification
         RuntimeState.loginFailureCounts.remove(usn);
         RuntimeState.loginLockoutUntil.remove(usn);
 
-        // 4. Check if student already submitted
-        String subKey = RuntimeState.activeSessionId + ":" + usn;
-        if (RuntimeState.studentSubmissions.containsKey(subKey)) {
-            throw new LabException(403, "Examination has already been submitted for USN " + usn + ". Re-login is blocked.", "ALREADY_SUBMITTED");
-        }
-
-        String assignedVersion = (String) student.get("assignedVersion");
-        if (assignedVersion == null || assignedVersion.isBlank()) assignedVersion = "A";
-
-        Map<String, Object> sm = RuntimeState.sessionMetadata;
-        String examDate = String.valueOf(sm.getOrDefault("examDate", sm.getOrDefault("scheduledDate", LocalDate.now().toString())));
-        String startTime = String.valueOf(sm.getOrDefault("startTime", "09:30:00"));
-        int durationMinutes = (int) parseLongSafe(sm.getOrDefault("durationMinutes", 90));
-        String endTime = resolveEndTime(startTime, sm.get("endTime"), durationMinutes);
-        String subjectCode = String.valueOf(sm.getOrDefault("subjectCode", "CS501"));
-        String subjectName = String.valueOf(sm.getOrDefault("subjectName", "Offline Examination"));
-        String department = String.valueOf(sm.getOrDefault("departmentCode", sm.getOrDefault("department", "CSE")));
-        String semester = String.valueOf(sm.getOrDefault("semester", "5"));
+        // Determine candidate's sitting and session metadata from the resolved cohort
+        String examDate = String.valueOf(targetMeta.getOrDefault("examDate", targetMeta.getOrDefault("scheduledDate", LocalDate.now().toString())));
+        String startTime = String.valueOf(targetMeta.getOrDefault("startTime", "09:30:00"));
+        int durationMinutes = (int) parseLongSafe(targetMeta.getOrDefault("durationMinutes", 90));
+        String endTime = resolveEndTime(startTime, targetMeta.get("endTime"), durationMinutes);
+        String subjectCode = String.valueOf(targetMeta.getOrDefault("subjectCode", "CS501"));
+        String subjectName = String.valueOf(targetMeta.getOrDefault("subjectName", "Offline Examination"));
+        String department = String.valueOf(targetMeta.getOrDefault("departmentCode", targetMeta.getOrDefault("department", "CSE")));
+        String semester = String.valueOf(targetMeta.getOrDefault("semester", "5"));
         String section = String.valueOf(student.getOrDefault("originalSection", student.getOrDefault("section", "A")));
-        String sittingName = String.valueOf(sm.getOrDefault("sittingName", sm.getOrDefault("sittingCode", "MORNING")));
+        String sittingName = String.valueOf(targetMeta.getOrDefault("sittingName", targetMeta.getOrDefault("sittingCode", targetCohort.sittingName != null ? targetCohort.sittingName : "MORNING")));
+
+        // Verify explicit filters if requested in form
+        if (form.containsKey("examinationId")) {
+            long reqEid = parseLongSafe(form.get("examinationId"));
+            if (reqEid > 0 && reqEid != candExamId) {
+                // Scenario 6: Candidate cannot manually switch to another cohort
+                throw new LabException(403, "Access denied: Student USN " + usn + " is allocated to Examination #" + candExamId + " (" + subjectName + ") and cannot access Examination #" + reqEid, "FORBIDDEN_EXAM_MISMATCH");
+            }
+        }
+        if (form.containsKey("sitting") || form.containsKey("sittingName") || form.containsKey("sittingCode")) {
+            String reqSit = String.valueOf(form.getOrDefault("sitting", form.getOrDefault("sittingName", form.get("sittingCode")))).trim().toUpperCase(Locale.ROOT);
+            if (!reqSit.isEmpty() && !reqSit.contains(sittingName.toUpperCase(Locale.ROOT)) && !sittingName.toUpperCase(Locale.ROOT).contains(reqSit)) {
+                recordLoginFailure(usn, now);
+                throw new LabException(401, "Invalid credentials: Student USN or Date of Birth is incorrect, or student is not allocated to this scheduled examination sitting.", "INVALID_CREDENTIALS");
+            }
+        }
 
         long scheduledStartMs = calculateScheduledStartMs(examDate, startTime);
         long scheduledEndMs = calculateScheduledEndMs(examDate, endTime, startTime, durationMinutes);
 
-        String availabilityState = "ACTIVE";
-        String availabilityMessage = "Examination is active and eligible.";
         boolean testBypass = exchange.getRequestHeaders().getFirst("X-Bypass-Start-Check") != null || Boolean.parseBoolean(String.valueOf(form.get("forceStart")));
 
+        // Scheduled time enforcement: support early login up to 30 minutes before scheduled start time
+        String availabilityState = "ACTIVE";
+        String availabilityMessage = "Examination is active and eligible.";
+
         if (now < scheduledStartMs && !testBypass) {
-            availabilityState = "NOT_STARTED";
-            availabilityMessage = "Examination is scheduled to begin at " + startTime + ".";
+            if (now >= scheduledStartMs - 1800000L) {
+                // Early login permitted: candidate can log in, view instructions and await scheduled start time
+                availabilityState = "SCHEDULED_WAITING";
+                availabilityMessage = "Examination scheduled to commence at " + startTime + " IST. Please review instructions.";
+            } else {
+                throw new LabException(403, "Examination has not started yet. Scheduled start time for " + sittingName + " sitting is " + startTime + " (Asia/Kolkata).", "EXAMINATION_NOT_STARTED");
+            }
         } else if (now >= scheduledEndMs && !testBypass) {
-            availabilityState = "COMPLETED";
-            availabilityMessage = "Examination window has closed.";
+            throw new LabException(403, "Examination scheduled window for " + sittingName + " sitting closed at " + endTime + " (Asia/Kolkata).", "EXAMINATION_WINDOW_CLOSED");
+        }
+
+        // 4. Check if student already submitted
+        String subKey = candExamId + ":" + usn;
+        if (RuntimeState.studentSubmissions.containsKey(subKey)) {
+            throw new LabException(403, "Examination has already been submitted for USN " + usn + ". Re-login is blocked.", "ALREADY_SUBMITTED");
+        }
+        String existingToken = RuntimeState.usnToSessionToken.get(usn);
+        if (existingToken != null) {
+            Map<String, Object> exSess = RuntimeState.studentSessions.get(existingToken);
+            if (exSess != null) {
+                long exExamId = parseLongSafe(exSess.getOrDefault("sessionId", exSess.getOrDefault("examinationId", 0L)));
+                if (exExamId > 0 && exExamId != candExamId) {
+                    RuntimeState.studentSessions.remove(existingToken);
+                    RuntimeState.usnToSessionToken.remove(usn);
+                    existingToken = null;
+                } else if (Boolean.TRUE.equals(exSess.get("submitted"))) {
+                    throw new LabException(403, "Examination has already been submitted for USN " + usn + ". Re-login is blocked.", "ALREADY_SUBMITTED");
+                }
+            }
+        }
+
+        // Decisions 1 & 5: Shared Authorized Computer Pool & Workstation Safeguards
+        // Any computer in the authorized lab may be used by any eligible student regardless of department.
+        // Safeguard: One computer cannot host multiple simultaneous active candidate sessions!
+        if (comp != null && !comp.isBlank()) {
+            String boundUsn = RuntimeState.workstationBindings.get(comp);
+            if (boundUsn != null && !boundUsn.equalsIgnoreCase(usn)) {
+                String boundToken = RuntimeState.usnToSessionToken.get(boundUsn);
+                Map<String, Object> boundSess = boundToken != null ? RuntimeState.studentSessions.get(boundToken) : null;
+                boolean isStillActive = boundSess != null && !Boolean.TRUE.equals(boundSess.get("submitted"));
+                if (isStillActive) {
+                    throw new LabException(409, "Workstation " + comp + " is currently in use by another active candidate (" + boundUsn + "). Please choose an available computer.", "WORKSTATION_IN_USE");
+                }
+            }
+            // Free any previous workstation bound to this student (e.g. if switching PCs before starting)
+            for (Map.Entry<String, String> entry : RuntimeState.workstationBindings.entrySet()) {
+                if (entry.getValue().equalsIgnoreCase(usn) && !entry.getKey().equalsIgnoreCase(comp)) {
+                    RuntimeState.workstationBindings.remove(entry.getKey());
+                }
+            }
+            RuntimeState.workstationBindings.put(comp, usn);
+        }
+
+        String assignedVersion = (String) student.get("assignedVersion");
+        if (assignedVersion == null || assignedVersion.isBlank()) {
+            assignedVersion = targetCohort.studentAssignedVersion.getOrDefault(usn, "A");
+        }
+
+        // Check if student attempt already started and has expired
+        if (existingToken != null) {
+            Map<String, Object> exSess = RuntimeState.studentSessions.get(existingToken);
+            if (exSess != null && Boolean.TRUE.equals(exSess.get("examStarted"))) {
+                long exExp = parseLongSafe(exSess.get("examExpiresAtMs"));
+                if (exExp > 0 && now >= exExp && !testBypass) {
+                    throw new LabException(403, "Examination time has expired for USN " + usn + ". Re-login is blocked.", "EXAM_EXPIRED");
+                }
+            }
         }
 
         // Recover or create session token
@@ -1082,7 +1392,8 @@ public final class LabServer {
             sess.put("section", section);
             sess.put("assignedVersion", assignedVersion);
             sess.put("assignedWorkstationId", comp);
-            sess.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+            sess.put("sessionId", String.valueOf(candExamId));
+            sess.put("examinationId", String.valueOf(candExamId));
             sess.put("sessionName", subjectName);
             sess.put("subjectCode", subjectCode);
             sess.put("subjectName", subjectName);
@@ -1095,18 +1406,20 @@ public final class LabServer {
             sess.put("scheduledStartMs", scheduledStartMs);
             sess.put("scheduledEndMs", scheduledEndMs);
             sess.put("durationMinutes", durationMinutes);
+            sess.put("packageUid", targetCohort.packageDoc != null ? targetCohort.packageDoc.get("packageUid") : (targetMeta.get("packageUid") != null ? targetMeta.get("packageUid") : ""));
+            sess.put("sittingName", sittingName);
 
             RuntimeState.studentSessions.put(token, sess);
             RuntimeState.usnToSessionToken.put(usn, token);
         }
+        sess.put("availabilityState", availabilityState);
+        sess.put("availabilityMessage", availabilityMessage);
         sess.put("lastHeartbeatMs", now);
-        if (comp != null && !comp.isBlank()) {
-            RuntimeState.workstationBindings.put(comp, usn);
-        }
         saveSessionToDisk(usn, sess);
 
-        // Calculate question count for this version
-        Map<String, Object> verObj = RuntimeState.versions.get(assignedVersion);
+        // Calculate question count for this version from target cohort
+        Map<String, Object> verObj = targetCohort.versions.get(assignedVersion);
+        if (verObj == null) verObj = RuntimeState.versions.get(assignedVersion);
         List<?> questions = verObj != null ? (List<?>) verObj.get("questions") : Collections.emptyList();
         int totalQuestions = questions != null && !questions.isEmpty() ? questions.size() : 25;
 
@@ -1123,8 +1436,8 @@ public final class LabServer {
         studentIdentity.put("dateOfBirth", dob);
 
         Map<String, Object> examSessionInfo = new LinkedHashMap<>();
-        examSessionInfo.put("examinationId", String.valueOf(RuntimeState.activeSessionId));
-        examSessionInfo.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+        examSessionInfo.put("examinationId", String.valueOf(candExamId));
+        examSessionInfo.put("sessionId", String.valueOf(candExamId));
         examSessionInfo.put("cycleName", "Semester Examination");
         examSessionInfo.put("examinationType", "REGULAR");
         examSessionInfo.put("subjectCode", subjectCode);
@@ -1151,9 +1464,22 @@ public final class LabServer {
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("authenticated", true);
+        resp.put("token", token);
+        resp.put("sessionToken", token);
         resp.put("student", studentIdentity);
         resp.put("examSession", examSessionInfo);
         resp.put("serverTimestampMs", now);
+
+        try {
+            broadcastSseEvent("student_connected", Map.of(
+                "eventType", "STUDENT_CONNECTED",
+                "usn", usn,
+                "studentName", studentIdentity.getOrDefault("fullName", usn),
+                "pcNumber", comp,
+                "sessionId", String.valueOf(RuntimeState.activeSessionId),
+                "timestamp", now
+            ));
+        } catch (Exception ignored) {}
 
         return Json.stringify(resp);
     }
@@ -1167,13 +1493,27 @@ public final class LabServer {
     }
 
     private static Map<String, Object> requireStudentSession(HttpExchange exchange) {
+        String token = null;
         String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            token = authHeader.substring(7).trim();
+        } else if (exchange.getRequestHeaders().getFirst("X-Session-Token") != null) {
+            token = exchange.getRequestHeaders().getFirst("X-Session-Token").trim();
+        }
+
+        if (token == null || token.isBlank()) {
             throw new LabException(401, "Sign-in required", "AUTH_REQUIRED");
         }
-        String token = authHeader.substring(7).trim();
         Map<String, Object> sess = RuntimeState.studentSessions.get(token);
         if (sess == null) throw new LabException(401, "Invalid or expired session token", "INVALID_TOKEN");
+
+        long sessExamId = parseLongSafe(sess.getOrDefault("examinationId", sess.getOrDefault("sessionId", 0L)));
+        if (!RuntimeState.activeCohorts.isEmpty() && sessExamId > 0 && !RuntimeState.activeCohorts.containsKey(sessExamId)) {
+            RuntimeState.studentSessions.remove(token);
+            String usn = (String) sess.get("usn");
+            if (usn != null) RuntimeState.usnToSessionToken.remove(usn);
+            throw new LabException(401, "Session expired: examination session has concluded.", "SESSION_EXPIRED");
+        }
         return sess;
     }
 
@@ -1192,24 +1532,27 @@ public final class LabServer {
         Map<String, Object> sess = requireStudentSession(exchange);
         Map<String, Object> sm = RuntimeState.sessionMetadata;
 
-        String examDate = String.valueOf(sm.getOrDefault("examDate", sm.getOrDefault("scheduledDate", LocalDate.now().toString())));
-        String startTime = String.valueOf(sm.getOrDefault("startTime", "09:30:00"));
-        int durationMinutes = (int) parseLongSafe(sm.getOrDefault("durationMinutes", 90));
-        String endTime = resolveEndTime(startTime, sm.get("endTime"), durationMinutes);
-        String subjectCode = String.valueOf(sm.getOrDefault("subjectCode", "CS501"));
-        String subjectName = String.valueOf(sm.getOrDefault("subjectName", "Offline Examination"));
-        String department = String.valueOf(sm.getOrDefault("departmentCode", sm.getOrDefault("department", "CSE")));
-        String semester = String.valueOf(sm.getOrDefault("semester", "5"));
-        String sittingName = String.valueOf(sm.getOrDefault("sittingName", sm.getOrDefault("sittingCode", "MORNING")));
+        String examDate = String.valueOf(sess.getOrDefault("examDate", sm.getOrDefault("examDate", sm.getOrDefault("scheduledDate", LocalDate.now().toString()))));
+        String startTime = String.valueOf(sess.getOrDefault("startTime", sm.getOrDefault("startTime", "09:30:00")));
+        int durationMinutes = (int) parseLongSafe(sess.getOrDefault("durationMinutes", sm.getOrDefault("durationMinutes", 90)));
+        String endTime = resolveEndTime(startTime, sess.getOrDefault("endTime", sm.get("endTime")), durationMinutes);
+        String subjectCode = String.valueOf(sess.getOrDefault("subjectCode", sm.getOrDefault("subjectCode", "CS501")));
+        String subjectName = String.valueOf(sess.getOrDefault("subjectName", sm.getOrDefault("subjectName", "Offline Examination")));
+        String department = String.valueOf(sess.getOrDefault("department", sm.getOrDefault("departmentCode", sm.getOrDefault("department", "CSE"))));
+        String semester = String.valueOf(sess.getOrDefault("semester", sm.getOrDefault("semester", "5")));
+        String sittingName = String.valueOf(sess.getOrDefault("sittingName", sm.getOrDefault("sittingName", sm.getOrDefault("sittingCode", "MORNING"))));
+        long examId = parseLongSafe(sess.getOrDefault("sessionId", sess.getOrDefault("examinationId", RuntimeState.activeSessionId)));
+        CohortState cohort = RuntimeState.activeCohorts.get(examId);
 
         String assignedVersion = (String) sess.getOrDefault("assignedVersion", "A");
-        Map<String, Object> verObj = RuntimeState.versions.get(assignedVersion);
+        Map<String, Object> verObj = cohort != null ? cohort.versions.get(assignedVersion) : null;
+        if (verObj == null) verObj = RuntimeState.versions.get(assignedVersion);
         List<?> questions = verObj != null ? (List<?>) verObj.get("questions") : Collections.emptyList();
         int totalQuestions = questions != null && !questions.isEmpty() ? questions.size() : 25;
 
         Map<String, Object> instr = new LinkedHashMap<>();
-        instr.put("examinationId", String.valueOf(RuntimeState.activeSessionId));
-        instr.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+        instr.put("examinationId", String.valueOf(examId));
+        instr.put("sessionId", String.valueOf(examId));
         instr.put("institutionName", "Maharaja Institute of Technology Mysore");
         instr.put("subjectCode", subjectCode);
         instr.put("subjectName", subjectName);
@@ -1255,22 +1598,25 @@ public final class LabServer {
     private static String handleStudentExamSession(HttpExchange exchange) {
         Map<String, Object> sess = requireStudentSession(exchange);
         String usn = (String) sess.get("usn");
-        String subKey = RuntimeState.activeSessionId + ":" + usn;
+        long examId = parseLongSafe(sess.getOrDefault("sessionId", sess.getOrDefault("examinationId", RuntimeState.activeSessionId)));
+        String subKey = examId + ":" + usn;
 
         Map<String, Object> sm = RuntimeState.sessionMetadata;
-        String examDate = String.valueOf(sm.getOrDefault("examDate", sm.getOrDefault("scheduledDate", LocalDate.now().toString())));
-        String startTime = String.valueOf(sm.getOrDefault("startTime", "09:30:00"));
-        int durationMinutes = (int) parseLongSafe(sm.getOrDefault("durationMinutes", 90));
-        String endTime = resolveEndTime(startTime, sm.get("endTime"), durationMinutes);
-        String subjectCode = String.valueOf(sm.getOrDefault("subjectCode", "CS501"));
-        String subjectName = String.valueOf(sm.getOrDefault("subjectName", "Offline Examination"));
+        String examDate = String.valueOf(sess.getOrDefault("examDate", sm.getOrDefault("examDate", sm.getOrDefault("scheduledDate", LocalDate.now().toString()))));
+        String startTime = String.valueOf(sess.getOrDefault("startTime", sm.getOrDefault("startTime", "09:30:00")));
+        int durationMinutes = (int) parseLongSafe(sess.getOrDefault("durationMinutes", sm.getOrDefault("durationMinutes", 90)));
+        String endTime = resolveEndTime(startTime, sess.getOrDefault("endTime", sm.get("endTime")), durationMinutes);
+        String subjectCode = String.valueOf(sess.getOrDefault("subjectCode", sm.getOrDefault("subjectCode", "CS501")));
+        String subjectName = String.valueOf(sess.getOrDefault("subjectName", sm.getOrDefault("subjectName", "Offline Examination")));
         String department = String.valueOf(sess.getOrDefault("department", "CSE"));
         String semester = String.valueOf(sess.getOrDefault("semester", "5"));
         String section = String.valueOf(sess.getOrDefault("section", "A"));
-        String sittingName = String.valueOf(sm.getOrDefault("sittingName", sm.getOrDefault("sittingCode", "MORNING")));
+        String sittingName = String.valueOf(sess.getOrDefault("sittingName", sm.getOrDefault("sittingName", sm.getOrDefault("sittingCode", "MORNING"))));
         String assignedVersion = String.valueOf(sess.getOrDefault("assignedVersion", "A"));
+        CohortState cohort = RuntimeState.activeCohorts.get(examId);
 
-        Map<String, Object> verObj = RuntimeState.versions.get(assignedVersion);
+        Map<String, Object> verObj = cohort != null ? cohort.versions.get(assignedVersion) : null;
+        if (verObj == null) verObj = RuntimeState.versions.get(assignedVersion);
         List<?> questions = verObj != null ? (List<?>) verObj.get("questions") : Collections.emptyList();
         int totalQuestions = questions != null && !questions.isEmpty() ? questions.size() : 25;
 
@@ -1285,8 +1631,8 @@ public final class LabServer {
         studentIdentity.put("sessionToken", sess.get("token"));
 
         Map<String, Object> examSessionInfo = new LinkedHashMap<>();
-        examSessionInfo.put("examinationId", String.valueOf(RuntimeState.activeSessionId));
-        examSessionInfo.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+        examSessionInfo.put("examinationId", String.valueOf(examId));
+        examSessionInfo.put("sessionId", String.valueOf(examId));
         examSessionInfo.put("cycleName", "Semester Examination");
         examSessionInfo.put("examinationType", "REGULAR");
         examSessionInfo.put("subjectCode", subjectCode);
@@ -1304,8 +1650,9 @@ public final class LabServer {
         examSessionInfo.put("marksPerCorrect", 1.2);
         examSessionInfo.put("negativeMarkingPerWrong", 0);
         examSessionInfo.put("laboratoryName", LAB_ID);
-        examSessionInfo.put("availabilityState", Boolean.TRUE.equals(sess.get("submitted")) ? "COMPLETED" : "ACTIVE");
-        examSessionInfo.put("availabilityMessage", "Session active");
+        String availState = Boolean.TRUE.equals(sess.get("submitted")) ? "COMPLETED" : String.valueOf(sess.getOrDefault("availabilityState", "ACTIVE"));
+        examSessionInfo.put("availabilityState", availState);
+        examSessionInfo.put("availabilityMessage", sess.getOrDefault("availabilityMessage", "Session active"));
         examSessionInfo.put("instructionsAvailable", true);
         examSessionInfo.put("selectedPaperLabel", "Set 1");
         examSessionInfo.put("assignedVersion", assignedVersion);
@@ -1326,6 +1673,10 @@ public final class LabServer {
         Map<String, Object> sess = requireStudentSession(exchange);
         String usn = (String) sess.get("usn");
 
+        if (Boolean.TRUE.equals(sess.get("submitted"))) {
+            throw new LabException(403, "Examination has already been submitted for USN " + usn + ". Re-attempt blocked.", "ALREADY_SUBMITTED");
+        }
+
         long now = getEffectiveTime(exchange, form);
         long schedStart = parseLongSafe(sess.get("scheduledStartMs"));
         long schedEnd = parseLongSafe(sess.get("scheduledEndMs"));
@@ -1343,20 +1694,29 @@ public final class LabServer {
             throw new LabException(403, "Examination schedule has closed.", "EXAM_EXPIRED");
         }
 
-        // LATE START ENFORCEMENT: Duration is min(durationMinutes, remaining time until scheduledEnd)
+        // LATE START ENFORCEMENT & TIMER PERSISTENCE:
+        // If candidate already started earlier, preserve their existing examExpiresAtMs and startedAtMs.
+        // Refreshing page or resuming does NOT reset or extend the timer!
         long durationMs = durationMinutes * 60L * 1000L;
         long expiresAt;
-        if (testBypass && (schedEnd == 0 || now > schedEnd)) {
-            expiresAt = now + durationMs;
+        if (Boolean.TRUE.equals(sess.get("examStarted")) && parseLongSafe(sess.get("examExpiresAtMs")) > 0) {
+            expiresAt = parseLongSafe(sess.get("examExpiresAtMs"));
+            if (now >= expiresAt && !testBypass) {
+                throw new LabException(403, "Examination time has expired for USN " + usn + ".", "EXAM_EXPIRED");
+            }
         } else {
-            expiresAt = Math.min(now + durationMs, schedEnd);
+            if (testBypass && (schedEnd == 0 || now > schedEnd)) {
+                expiresAt = now + durationMs;
+            } else {
+                expiresAt = Math.min(now + durationMs, schedEnd);
+            }
+            sess.put("startedAtMs", now);
+            sess.put("examExpiresAtMs", expiresAt);
         }
         long remainingSeconds = Math.max(0, (expiresAt - now) / 1000L);
 
         sess.put("examStarted", true);
         sess.put("instructionsConfirmed", true);
-        sess.put("startedAtMs", now);
-        sess.put("examExpiresAtMs", expiresAt);
 
         saveSessionToDisk(usn, sess);
 
@@ -1380,11 +1740,20 @@ public final class LabServer {
     private static String handleStudentState(HttpExchange exchange) {
         Map<String, Object> sess = requireStudentSession(exchange);
         String usn = (String) sess.get("usn");
-        String subKey = RuntimeState.activeSessionId + ":" + usn;
+        long examId = parseLongSafe(sess.getOrDefault("sessionId", sess.getOrDefault("examinationId", RuntimeState.activeSessionId)));
+        String subKey = examId + ":" + usn;
 
         long now = getEffectiveTime(exchange, null);
-        long expiresAt = parseLongSafe(sess.getOrDefault("examExpiresAtMs", now + 3600000L));
-        long remainingSeconds = Math.max(0, (expiresAt - now) / 1000L);
+        int durationMinutes = (int) parseLongSafe(sess.getOrDefault("durationMinutes", 120));
+        long remainingSeconds;
+        long expiresAt;
+        if (Boolean.TRUE.equals(sess.get("examStarted"))) {
+            expiresAt = parseLongSafe(sess.get("examExpiresAtMs"));
+            remainingSeconds = Math.max(0, (expiresAt - now) / 1000L);
+        } else {
+            remainingSeconds = durationMinutes * 60L;
+            expiresAt = now + (remainingSeconds * 1000L);
+        }
 
         // Auto-finalize if time expired
         if (Boolean.TRUE.equals(sess.get("examStarted")) && !Boolean.TRUE.equals(sess.get("submitted")) && now >= expiresAt && expiresAt > 0) {
@@ -1396,8 +1765,8 @@ public final class LabServer {
         }
 
         Map<String, Object> resp = new LinkedHashMap<>();
-        resp.put("examinationId", String.valueOf(RuntimeState.activeSessionId));
-        resp.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+        resp.put("examinationId", String.valueOf(examId));
+        resp.put("sessionId", String.valueOf(examId));
         resp.put("studentUsn", usn);
         resp.put("assignedVersion", sess.get("assignedVersion"));
         resp.put("workstationId", sess.get("assignedWorkstationId"));
@@ -1416,39 +1785,30 @@ public final class LabServer {
     @SuppressWarnings("unchecked")
     private static String handleStudentQuestions(HttpExchange exchange) {
         Map<String, Object> sess = requireStudentSession(exchange);
+        if (Boolean.TRUE.equals(sess.get("submitted"))) {
+            throw new LabException(403, "Examination has already been submitted for this session. Questions cannot be accessed.", "ALREADY_SUBMITTED");
+        }
         if (!Boolean.TRUE.equals(sess.get("examStarted"))) {
             throw new LabException(403, "Examination has not been started yet. Complete instructions first.", "EXAM_NOT_STARTED");
         }
 
-        String usn = (String) sess.get("usn");
-        if (usn != null && (RuntimeState.roster.get(usn) == null || RuntimeState.versions.isEmpty())) {
-            Map<String, Object> bestPkg = null;
-            long bestEid = -1;
-            for (Map<String, Object> pkg : RuntimeState.packages.values()) {
-                Map<String, Object> pPayload = (Map<String, Object>) pkg.get("payload");
-                if (pPayload == null) pPayload = pkg;
-                Object rObj = pPayload.get("roster");
-                if (rObj instanceof List<?> list) {
-                    for (Object it : list) {
-                        if (it instanceof Map<?, ?> sm && usn.equalsIgnoreCase(String.valueOf(sm.get("usn")))) {
-                            long curEid = parseLongSafe(pkg.get("examinationId"));
-                            if (curEid > bestEid) {
-                                bestEid = curEid;
-                                bestPkg = pkg;
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            if (bestPkg != null) {
-                activatePackageIntoMemory(bestPkg);
+        String version = (String) sess.get("assignedVersion");
+        long sessEid = parseLongSafe(sess.getOrDefault("examinationId", sess.getOrDefault("sessionId", RuntimeState.activeSessionId)));
+        CohortState cohort = RuntimeState.activeCohorts.get(sessEid);
+        Map<String, Object> verObj = cohort != null ? cohort.versions.get(version) : null;
+        if (verObj == null) verObj = RuntimeState.versions.get(version);
+        String pkgUid = (String) sess.get("packageUid");
+        if (verObj == null && pkgUid != null && RuntimeState.packages.containsKey(pkgUid)) {
+            Map<String, Object> pkgDoc = RuntimeState.packages.get(pkgUid);
+            Map<String, Object> pl = (Map<String, Object>) pkgDoc.getOrDefault("payload", pkgDoc);
+            Map<String, Object> vm = (Map<String, Object>) pl.get("versions");
+            if (vm != null && vm.containsKey(version)) {
+                verObj = Map.of("questions", vm.get(version));
             }
         }
-
-        String version = (String) sess.get("assignedVersion");
-        Map<String, Object> verObj = RuntimeState.versions.get(version);
-        if (verObj == null && !RuntimeState.versions.isEmpty()) {
+        if (verObj == null && cohort != null && !cohort.versions.isEmpty()) {
+            verObj = cohort.versions.values().iterator().next();
+        } else if (verObj == null && !RuntimeState.versions.isEmpty()) {
             verObj = RuntimeState.versions.values().iterator().next();
         }
 
@@ -1491,8 +1851,8 @@ public final class LabServer {
         }
 
         Map<String, Object> resp = new LinkedHashMap<>();
-        resp.put("examinationId", String.valueOf(RuntimeState.activeSessionId));
-        resp.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+        resp.put("examinationId", String.valueOf(sessEid));
+        resp.put("sessionId", String.valueOf(sessEid));
         resp.put("studentUsn", sess.get("usn"));
         resp.put("workstationId", sess.get("assignedWorkstationId"));
         resp.put("selectedPaperLabel", "Set 1");
@@ -1514,13 +1874,23 @@ public final class LabServer {
         }
 
         // Check if examination is locked
-        Map<String, Object> lockState = RuntimeState.studentLockStates.get(usn);
+        long examId = parseLongSafe(sess.getOrDefault("sessionId", sess.getOrDefault("examinationId", RuntimeState.activeSessionId)));
+        String sittingName = String.valueOf(sess.getOrDefault("sittingName", RuntimeState.activeSittingName != null ? RuntimeState.activeSittingName : ""));
+        String attemptKey = getAttemptLockKey(examId, sittingName, usn);
+
+        Map<String, Object> lockState = RuntimeState.studentLockStates.get(attemptKey);
+        if (lockState == null) {
+            Map<String, Object> legacy = RuntimeState.studentLockStates.get(usn);
+            if (legacy != null && String.valueOf(examId).equals(String.valueOf(legacy.get("examinationId")))) {
+                lockState = legacy;
+            }
+        }
         if (lockState != null && Boolean.TRUE.equals(lockState.get("isLocked"))) {
             throw new LabException(403, "Examination is locked due to security violation. Invigilator unlock required.", "SESSION_LOCKED");
         }
 
         // Check if examination is already submitted
-        String subKey = RuntimeState.activeSessionId + ":" + usn;
+        String subKey = examId + ":" + usn;
         if (RuntimeState.studentSubmissions.containsKey(subKey) || Boolean.TRUE.equals(sess.get("submitted"))) {
             throw new LabException(403, "Examination already submitted. Answers cannot be changed.", "ALREADY_SUBMITTED");
         }
@@ -1538,13 +1908,36 @@ public final class LabServer {
 
         // Validate Question ID belongs to assigned version
         String assignedVersion = (String) sess.getOrDefault("assignedVersion", "A");
-        Map<String, Object> verObj = RuntimeState.versions.get(assignedVersion);
+        CohortState cohort = RuntimeState.activeCohorts.get(examId);
+        Map<String, Object> verObj = cohort != null ? cohort.versions.get(assignedVersion) : null;
+        if (verObj == null) verObj = RuntimeState.versions.get(assignedVersion);
         List<?> rawQuestions = verObj != null ? (List<?>) verObj.get("questions") : Collections.emptyList();
+        System.out.println("[DEBUG-ANS] usn=" + usn + ", assignedVer=" + assignedVersion + ", versions=" + RuntimeState.versions.keySet() + ", rawQCount=" + rawQuestions.size() + ", q0=" + (rawQuestions.isEmpty() ? "empty" : rawQuestions.get(0)));
         boolean qFound = false;
+        String resolvedQuestionUid = questionId;
         for (Object q : rawQuestions) {
-            if (q instanceof Map<?, ?> qm && questionId.equals(qm.get("questionUid"))) {
-                qFound = true;
-                break;
+            if (q instanceof Map<?, ?> qmRaw) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> qm = (Map<String, Object>) qmRaw;
+                String uid = qm.get("questionUid") != null ? String.valueOf(qm.get("questionUid")) : "";
+                String qid = qm.get("questionId") != null ? String.valueOf(qm.get("questionId")) : (qm.get("id") != null ? String.valueOf(qm.get("id")) : "");
+                String pos = "";
+                Object posObj = qm.get("displayPosition") != null ? qm.get("displayPosition")
+                        : (qm.get("displayNumber") != null ? qm.get("displayNumber")
+                        : (qm.get("position") != null ? qm.get("position")
+                        : qm.get("display_position")));
+                if (posObj instanceof Number n) {
+                    pos = String.valueOf(n.longValue());
+                } else if (posObj != null) {
+                    pos = String.valueOf(posObj);
+                    if (pos.endsWith(".0")) pos = pos.substring(0, pos.length() - 2);
+                }
+
+                if (questionId.equals(uid) || questionId.equals(qid) || questionId.equals(pos)) {
+                    qFound = true;
+                    resolvedQuestionUid = !uid.isBlank() ? uid : questionId;
+                    break;
+                }
             }
         }
         if (!qFound) {
@@ -1569,12 +1962,16 @@ public final class LabServer {
 
         Map<String, Object> rec = new LinkedHashMap<>();
         rec.put("questionId", questionId);
+        rec.put("questionUid", resolvedQuestionUid);
         rec.put("selectedOption", selOpt);
         rec.put("markedForReview", markedForReview);
         rec.put("visited", visited);
         rec.put("updatedAt", isoTime);
 
         RuntimeState.studentAnswers.computeIfAbsent(usn, k -> new ConcurrentHashMap<>()).put(questionId, rec);
+        if (!resolvedQuestionUid.equals(questionId)) {
+            RuntimeState.studentAnswers.computeIfAbsent(usn, k -> new ConcurrentHashMap<>()).put(resolvedQuestionUid, rec);
+        }
         saveAnswersToDisk(usn);
 
         long remSec = expiresAt > now ? (expiresAt - now) / 1000L : 0L;
@@ -1606,9 +2003,27 @@ public final class LabServer {
         }
         if (usn.isBlank()) throw new LabException(400, "studentUsn is required", "MISSING_USN");
 
-        Map<String, Object> lock = RuntimeState.studentLockStates.computeIfAbsent(usn, k -> new LinkedHashMap<>());
+        long examId = parseLongSafe(form.get("examinationId"));
+        String sittingName = String.valueOf(form.getOrDefault("sittingName", form.getOrDefault("sittingCode", ""))).trim().toUpperCase(Locale.ROOT);
+
+        String sessTok = RuntimeState.usnToSessionToken.get(usn);
+        Map<String, Object> s = sessTok != null ? RuntimeState.studentSessions.get(sessTok) : null;
+        if (s != null) {
+            if (examId <= 0) examId = parseLongSafe(s.get("examinationId"));
+            if (examId <= 0) examId = parseLongSafe(s.get("sessionId"));
+            if (sittingName.isBlank()) sittingName = String.valueOf(s.getOrDefault("sittingName", s.getOrDefault("sittingCode", ""))).trim().toUpperCase(Locale.ROOT);
+        }
+        if (examId <= 0 && RuntimeState.activeSessionId != null) examId = RuntimeState.activeSessionId;
+        if (sittingName.isBlank() && RuntimeState.activeSittingName != null) sittingName = RuntimeState.activeSittingName.toUpperCase(Locale.ROOT);
+
+        String attemptKey = getAttemptLockKey(examId, sittingName, usn);
+
+        Map<String, Object> lock = RuntimeState.studentLockStates.computeIfAbsent(attemptKey, k -> new ConcurrentHashMap<>());
         int count = ((Number) lock.getOrDefault("violationCount", 0)).intValue() + 1;
         lock.put("isLocked", true);
+        lock.put("examinationId", String.valueOf(examId));
+        lock.put("sittingName", sittingName);
+        lock.put("studentUsn", usn);
         lock.put("violationCount", count);
         lock.put("lockedAtMs", System.currentTimeMillis());
         lock.put("lastViolationType", form.get("violationType"));
@@ -1617,18 +2032,37 @@ public final class LabServer {
         lock.put("savedRemainingSeconds", form.getOrDefault("remainingSeconds", 2700));
         lock.put("savedAnswerCount", form.getOrDefault("answeredCount", 0));
 
-        saveSecurityToDisk(usn, lock);
+        saveSecurityToDisk(attemptKey, lock);
 
         Map<String, Object> evt = new LinkedHashMap<>();
-        evt.put("eventId", "SEC-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT));
+        String eventId = "SEC-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        evt.put("id", eventId);
+        evt.put("eventId", eventId);
         evt.put("studentUsn", usn);
-        String sessTok = RuntimeState.usnToSessionToken.get(usn);
-        Map<String, Object> s = sessTok != null ? RuntimeState.studentSessions.get(sessTok) : null;
+        evt.put("usn", usn);
+        Map<String, Object> stud = RuntimeState.roster.get(usn);
+        evt.put("studentName", stud != null ? stud.get("fullName") : usn);
         evt.put("pcNumber", s != null ? s.get("assignedWorkstationId") : "LAB01-PC-01");
         evt.put("eventType", String.valueOf(form.getOrDefault("violationType", "TAB_SWITCH")));
         evt.put("timestamp", Instant.now().toString());
         evt.put("resolved", false);
+        evt.put("lockStatus", "Locked - Awaiting Invigilator");
+        evt.put("examinationId", String.valueOf(examId));
+        evt.put("sessionId", String.valueOf(examId));
+        evt.put("examinationCode", "EXAM-" + examId);
+        evt.put("sittingName", sittingName);
         RuntimeState.suspiciousEvents.add(evt);
+
+        try {
+            broadcastSseEvent("student_locked", Map.of(
+                "eventType", "STUDENT_LOCKED",
+                "usn", usn,
+                "pcNumber", s != null ? s.get("assignedWorkstationId") : "LAB01-PC-01",
+                "violationType", String.valueOf(form.getOrDefault("violationType", "TAB_SWITCH")),
+                "sessionId", String.valueOf(examId),
+                "timestamp", Instant.now().toString()
+            ));
+        } catch (Exception ignored) {}
 
         return Json.stringify(Map.of("success", true, "locked", true, "violationCount", count));
     }
@@ -1637,34 +2071,92 @@ public final class LabServer {
         String usn = String.valueOf(form.getOrDefault("studentUsn", "")).trim().toUpperCase(Locale.ROOT);
         if (usn.isBlank()) throw new LabException(400, "studentUsn is required", "MISSING_USN");
 
-        Map<String, Object> lock = RuntimeState.studentLockStates.computeIfAbsent(usn, k -> new LinkedHashMap<>());
+        long examId = parseLongSafe(form.get("examinationId"));
+        String sittingName = String.valueOf(form.getOrDefault("sittingName", form.getOrDefault("sittingCode", ""))).trim().toUpperCase(Locale.ROOT);
+
+        // Deduce student's examination and sitting from active runtime state
+        if (examId <= 0 || sittingName.isBlank()) {
+            String token = RuntimeState.usnToSessionToken.get(usn);
+            if (token != null) {
+                Map<String, Object> sess = RuntimeState.studentSessions.get(token);
+                if (sess != null) {
+                    if (examId <= 0) examId = parseLongSafe(sess.get("examinationId"));
+                    if (examId <= 0) examId = parseLongSafe(sess.get("sessionId"));
+                    if (sittingName.isBlank()) sittingName = String.valueOf(sess.getOrDefault("sittingName", sess.getOrDefault("sittingCode", ""))).trim().toUpperCase(Locale.ROOT);
+                }
+            }
+        }
+        if (examId <= 0 && RuntimeState.activeSessionId != null) {
+            examId = RuntimeState.activeSessionId;
+        }
+        if (sittingName.isBlank() && RuntimeState.activeSittingName != null) {
+            sittingName = RuntimeState.activeSittingName.toUpperCase(Locale.ROOT);
+        }
+
+        String attemptKey = getAttemptLockKey(examId, sittingName, usn);
+
+        Map<String, Object> lock = RuntimeState.studentLockStates.get(attemptKey);
+        if (lock == null) {
+            lock = new ConcurrentHashMap<>();
+            RuntimeState.studentLockStates.put(attemptKey, lock);
+        }
         int failed = ((Number) lock.getOrDefault("failedAttempts", 0)).intValue();
 
         if (Boolean.TRUE.equals(lock.get("isPermanentlyLocked")) || failed >= 3) {
             lock.put("isPermanentlyLocked", true);
-            saveSecurityToDisk(usn, lock);
+            saveSecurityToDisk(attemptKey, lock);
+            RuntimeState.studentLockStates.put(usn, lock);
+
+            try {
+                broadcastSseEvent("student_unlocked", Map.of(
+                    "eventType", "STUDENT_UNLOCKED",
+                    "usn", usn,
+                    "sessionId", String.valueOf(examId),
+                    "timestamp", Instant.now().toString()
+                ));
+            } catch (Exception ignored) {}
             throw new LabException(403, "Maximum authorization attempts exceeded (3/3). This session is permanently locked. Chief Invigilator administrative override required.", "PERMANENT_LOCK");
         }
 
         String entered = String.valueOf(form.getOrDefault("enteredPassword", form.getOrDefault("candidateSecret", form.getOrDefault("unlockCredential", "")))).trim();
-        String sittingUnlock = String.valueOf(RuntimeState.sessionMetadata.getOrDefault("invigilatorPassword", ""));
-        boolean match = entered.equals("MIT@CBT2026") || entered.equals("MITPRO@2587") || (!sittingUnlock.isEmpty() && entered.equals(sittingUnlock));
 
-        if (!match && RuntimeState.sessionMetadata.containsKey("sessionUnlockVerifier")) {
-            Object verObj = RuntimeState.sessionMetadata.get("sessionUnlockVerifier");
-            if (verObj instanceof Map<?, ?> vm) {
-                String expHash = String.valueOf(vm.get("verifierHash"));
-                String saltHex = String.valueOf(vm.get("salt"));
-                if (expHash != null && saltHex != null && !expHash.isBlank() && !saltHex.isBlank()) {
-                    try {
-                        byte[] salt = HexFormat.of().parseHex(saltHex);
-                        String computed = HexFormat.of().formatHex(derive(entered, salt));
-                        if (expHash.equalsIgnoreCase(computed)) {
-                            match = true;
-                        }
-                    } catch (Exception ignored) {}
-                }
+        // Look up sitting-specific verifier
+        Map<String, Object> targetVerifier = null;
+        if (examId > 0 && !sittingName.isBlank()) {
+            targetVerifier = RuntimeState.sittingUnlockVerifiers.get(examId + ":" + sittingName);
+        }
+        if (targetVerifier == null && !sittingName.isBlank()) {
+            targetVerifier = RuntimeState.sittingUnlockVerifiers.get(sittingName);
+        }
+        if (targetVerifier == null && examId > 0) {
+            targetVerifier = RuntimeState.sittingUnlockVerifiers.get(String.valueOf(examId));
+        }
+        if (targetVerifier == null && RuntimeState.sessionMetadata.containsKey("sessionUnlockVerifier")) {
+            Object fallback = RuntimeState.sessionMetadata.get("sessionUnlockVerifier");
+            if (fallback instanceof Map<?, ?> m) {
+                targetVerifier = (Map<String, Object>) m;
             }
+        }
+
+        if (targetVerifier == null) {
+            throw new LabException(400, "No invigilator unlock credential provisioned for this sitting. Please notify COE.", "NO_CREDENTIAL_PROVISIONED");
+        }
+
+        if (Boolean.TRUE.equals(targetVerifier.get("isRevoked"))) {
+            throw new LabException(403, "The invigilator unlock credential for this examination sitting has been revoked by COE.", "CREDENTIAL_REVOKED");
+        }
+
+        boolean match = false;
+        String expHash = String.valueOf(targetVerifier.get("verifierHash"));
+        String saltHex = String.valueOf(targetVerifier.get("salt"));
+        if (expHash != null && saltHex != null && !expHash.isBlank() && !saltHex.isBlank()) {
+            try {
+                byte[] salt = HexFormat.of().parseHex(saltHex);
+                String computed = HexFormat.of().formatHex(derive(entered, salt));
+                if (expHash.equalsIgnoreCase(computed)) {
+                    match = true;
+                }
+            } catch (Exception ignored) {}
         }
 
         if (match) {
@@ -1675,12 +2167,26 @@ public final class LabServer {
             lock.put("resumptionCount", resCount);
             lock.put("lastResumedAt", Instant.now().toString());
 
-            saveSecurityToDisk(usn, lock);
+            saveSecurityToDisk(attemptKey, lock);
+            RuntimeState.studentLockStates.put(usn, lock);
+
+            try {
+                broadcastSseEvent("student_unlocked", Map.of(
+                    "eventType", "STUDENT_UNLOCKED",
+                    "usn", usn,
+                    "sessionId", String.valueOf(examId),
+                    "timestamp", Instant.now().toString()
+                ));
+            } catch (Exception ignored) {}
 
             for (Map<String, Object> se : RuntimeState.suspiciousEvents) {
-                if (usn.equals(se.get("studentUsn"))) {
+                if (usn.equalsIgnoreCase(String.valueOf(se.get("studentUsn"))) || usn.equalsIgnoreCase(String.valueOf(se.get("usn")))) {
                     se.put("resolved", true);
+                    se.put("lockStatus", "Unlocked by Authorised Invigilator");
                     se.put("resolvedAt", Instant.now().toString());
+                    se.put("unlockTime", Instant.now().toString());
+                    se.put("invigilatorIdentity", "Authorized Invigilator");
+                    se.put("unlockReason", "Candidate identity verified and workstation unlocked");
                 }
             }
 
@@ -1709,7 +2215,17 @@ public final class LabServer {
             failed++;
             lock.put("failedAttempts", failed);
             if (failed >= 3) lock.put("isPermanentlyLocked", true);
-            saveSecurityToDisk(usn, lock);
+            saveSecurityToDisk(attemptKey, lock);
+            RuntimeState.studentLockStates.put(usn, lock);
+
+            try {
+                broadcastSseEvent("student_unlocked", Map.of(
+                    "eventType", "STUDENT_UNLOCKED",
+                    "usn", usn,
+                    "sessionId", String.valueOf(examId),
+                    "timestamp", Instant.now().toString()
+                ));
+            } catch (Exception ignored) {}
 
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("success", false);
@@ -1734,7 +2250,7 @@ public final class LabServer {
     @SuppressWarnings("unchecked")
     public static Map<String, Object> finalizeSubmission(Map<String, Object> sess, Map<String, Object> form) throws Exception {
         String usn = (String) sess.get("usn");
-        long sessEid = parseLongSafe(sess.getOrDefault("sessionId", RuntimeState.activeSessionId));
+        long sessEid = parseLongSafe(sess.getOrDefault("examinationId", sess.getOrDefault("sessionId", RuntimeState.activeSessionId)));
         String subKey = sessEid + ":" + usn;
 
         // Idempotency: return existing receipt if already submitted
@@ -1748,6 +2264,13 @@ public final class LabServer {
             RuntimeState.studentSubmissions.put(RuntimeState.activeSessionId + ":" + usn, now);
         }
         sess.put("submitted", true);
+        sess.put("submittedAt", now);
+
+        // Free workstation binding so computer is immediately available for the next candidate
+        String ws = (String) sess.get("assignedWorkstationId");
+        if (ws != null && !ws.isBlank()) {
+            RuntimeState.workstationBindings.remove(ws);
+        }
 
         Map<String, Object> answers = RuntimeState.studentAnswers.getOrDefault(usn, Collections.emptyMap());
         int answeredCount = 0;
@@ -1756,18 +2279,20 @@ public final class LabServer {
         }
 
         String assignedVer = (String) sess.getOrDefault("assignedVersion", "A");
-        Map<String, Object> verObj = RuntimeState.versions.get(assignedVer);
+        CohortState cohort = RuntimeState.activeCohorts.get(sessEid);
+        Map<String, Object> verObj = cohort != null ? cohort.versions.get(assignedVer) : null;
+        if (verObj == null) verObj = RuntimeState.versions.get(assignedVer);
         List<?> questions = verObj != null ? (List<?>) verObj.get("questions") : Collections.emptyList();
         int totalQuestions = questions != null && !questions.isEmpty() ? questions.size() : 25;
         int unansweredCount = Math.max(0, totalQuestions - answeredCount);
 
         String trigger = String.valueOf(form.getOrDefault("submissionTrigger", "MANUAL"));
-        String ref = "SUB-" + RuntimeState.activeSessionId + "-" + usn + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        String ref = "SUB-" + sessEid + "-" + usn + "-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
 
         Map<String, Object> receipt = new LinkedHashMap<>();
         receipt.put("confirmationReference", ref);
-        receipt.put("examinationId", String.valueOf(RuntimeState.activeSessionId));
-        receipt.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+        receipt.put("examinationId", String.valueOf(sessEid));
+        receipt.put("sessionId", String.valueOf(sessEid));
         receipt.put("studentUsn", usn);
         receipt.put("studentName", sess.get("fullName"));
         receipt.put("department", sess.get("department"));
@@ -1790,7 +2315,8 @@ public final class LabServer {
         subDoc.put("fullName", sess.get("fullName"));
         subDoc.put("assignedVersion", assignedVer);
         subDoc.put("workstationId", sess.get("assignedWorkstationId"));
-        subDoc.put("sessionId", RuntimeState.activeSessionId);
+        subDoc.put("sessionId", sessEid);
+        subDoc.put("examinationId", sessEid);
         subDoc.put("submittedAt", now);
         subDoc.put("submissionTrigger", trigger);
         subDoc.put("answers", answers);
@@ -1806,6 +2332,16 @@ public final class LabServer {
         Path finalFile = SUBMISSIONS_DIR.resolve(usn + "_final_submission.json");
         Files.writeString(finalFile, Json.stringify(subDoc), StandardCharsets.UTF_8);
         saveSessionToDisk(usn, sess);
+
+        try {
+            broadcastSseEvent("student_submitted", Map.of(
+                "eventType", "STUDENT_SUBMITTED",
+                "usn", usn,
+                "confirmationReference", ref,
+                "sessionId", String.valueOf(sessEid),
+                "timestamp", Instant.now().toString()
+            ));
+        } catch (Exception ignored) {}
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("submitted", true);
@@ -1850,12 +2386,69 @@ public final class LabServer {
         }
     }
 
-    private static void saveSecurityToDisk(String usn, Map<String, Object> lock) {
+    private static synchronized void saveUnlockVerifiersToDisk() throws IOException {
+        Files.createDirectories(CREDENTIALS_DIR);
+        Path tmpFile = CREDENTIALS_DIR.resolve("sitting_unlock_verifiers.json.tmp");
+        String json = Json.stringify(RuntimeState.sittingUnlockVerifiers);
+        Files.writeString(tmpFile, json, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.SYNC);
         try {
-            Path file = SUBMISSIONS_DIR.resolve(usn + "_security.json");
+            Files.move(tmpFile, CREDENTIALS_FILE, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(tmpFile, CREDENTIALS_FILE, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void loadPersistedUnlockVerifiers() {
+        try {
+            if (!Files.exists(CREDENTIALS_FILE)) return;
+            String content = Files.readString(CREDENTIALS_FILE, StandardCharsets.UTF_8);
+            if (content == null || content.isBlank()) return;
+            Object parsed = Json.parse(content);
+            if (!(parsed instanceof Map<?, ?> map)) {
+                System.err.println("[LabStorage ERROR] Corrupted sitting_unlock_verifiers.json: Expected JSON object. Failing closed.");
+                return;
+            }
+            int loaded = 0;
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                String key = String.valueOf(entry.getKey());
+                if (entry.getValue() instanceof Map<?, ?> verMap) {
+                    String hash = String.valueOf(verMap.get("verifierHash"));
+                    String salt = String.valueOf(verMap.get("salt"));
+                    if (hash != null && !hash.isBlank() && salt != null && !salt.isBlank()) {
+                        Map<String, Object> cleanVer = new LinkedHashMap<>();
+                        verMap.forEach((k, v) -> cleanVer.put(String.valueOf(k), v));
+                        cleanVer.remove("rawSecret"); // Strictly prevent any plaintext password
+                        RuntimeState.sittingUnlockVerifiers.put(key, cleanVer);
+                        loaded++;
+                    } else if (Boolean.TRUE.equals(verMap.get("isRevoked"))) {
+                        Map<String, Object> cleanVer = new LinkedHashMap<>();
+                        verMap.forEach((k, v) -> cleanVer.put(String.valueOf(k), v));
+                        RuntimeState.sittingUnlockVerifiers.put(key, cleanVer);
+                        loaded++;
+                    } else {
+                        System.err.println("[LabStorage WARNING] Invalid/corrupted verifier entry for key " + key + ". Skipped.");
+                    }
+                }
+            }
+            System.out.println("[LabStorage] Loaded and validated " + loaded + " sitting unlock verifier records from local persistent storage.");
+        } catch (Exception ex) {
+            System.err.println("[LabStorage ERROR] Failed to load persisted unlock verifiers (failing closed): " + ex.getMessage());
+        }
+    }
+
+    static String getAttemptLockKey(long examId, String sittingName, String usn) {
+        String s = (sittingName == null || sittingName.isBlank()) ? "SESSION" : sittingName.trim().toUpperCase(Locale.ROOT).replaceAll("[\\s\\-_]+", "_");
+        String u = (usn == null) ? "" : usn.trim().toUpperCase(Locale.ROOT);
+        return examId + "_" + s + "_" + u;
+    }
+
+    private static void saveSecurityToDisk(String attemptKey, Map<String, Object> lock) {
+        try {
+            Path file = SUBMISSIONS_DIR.resolve(attemptKey + "_security.json");
             Files.writeString(file, Json.stringify(lock), StandardCharsets.UTF_8);
         } catch (Exception ex) {
-            System.err.println("[LabStorage] Failed to save security state for " + usn + ": " + ex.getMessage());
+            System.err.println("[LabStorage] Failed to save security state for " + attemptKey + ": " + ex.getMessage());
         }
     }
 
@@ -1881,7 +2474,107 @@ public final class LabServer {
         return Json.stringify(Map.of("acknowledged", true, "serverTimestampMs", now, "remainingSeconds", remSec));
     }
 
-    // --- PHASE 9: LIVE MONITORING TELEMETRY ---
+    // --- PHASE 9: LIVE MONITORING TELEMETRY & SSE STREAM ---
+    static final List<SseClient> sseClients = new CopyOnWriteArrayList<>();
+
+    static class SseClient {
+        final HttpExchange exchange;
+        final OutputStream os;
+        volatile boolean closed = false;
+
+        SseClient(HttpExchange exchange, OutputStream os) {
+            this.exchange = exchange;
+            this.os = os;
+        }
+
+        synchronized boolean send(String event, String data) {
+            if (closed) return false;
+            try {
+                StringBuilder sb = new StringBuilder();
+                if (event != null && !event.isEmpty()) {
+                    sb.append("event: ").append(event).append("\n");
+                }
+                sb.append("data: ").append(data.replace("\r", "").replace("\n", "\ndata: ")).append("\n\n");
+                os.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+                os.flush();
+                return true;
+            } catch (Exception e) {
+                closed = true;
+                try { exchange.close(); } catch (Exception ignored) {}
+                return false;
+            }
+        }
+
+        synchronized boolean sendComment(String comment) {
+            if (closed) return false;
+            try {
+                os.write((": " + comment + "\n\n").getBytes(StandardCharsets.UTF_8));
+                os.flush();
+                return true;
+            } catch (Exception e) {
+                closed = true;
+                try { exchange.close(); } catch (Exception ignored) {}
+                return false;
+            }
+        }
+    }
+
+    public static void notifyCentralEvent(String eventType, Map<String, Object> data) {
+        try {
+            String centralUrl = System.getenv().getOrDefault("CENTRAL_URL", "http://127.0.0.1:8081");
+            var client = java.net.http.HttpClient.newHttpClient();
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("eventType", eventType);
+            body.put("data", data);
+            var req = java.net.http.HttpRequest.newBuilder()
+                    .uri(java.net.URI.create(centralUrl + "/api/v1/events/broadcast"))
+                    .header("Content-Type", "application/json")
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(Json.stringify(body)))
+                    .timeout(java.time.Duration.ofSeconds(3))
+                    .build();
+            client.sendAsync(req, java.net.http.HttpResponse.BodyHandlers.discarding());
+        } catch (Exception ignored) {}
+    }
+
+    public static void broadcastSseEvent(String eventType, Map<String, Object> data) {
+        String json = Json.stringify(data);
+        List<SseClient> dead = new ArrayList<>();
+        for (SseClient c : sseClients) {
+            if (!c.send(eventType, json)) {
+                dead.add(c);
+            }
+        }
+        sseClients.removeAll(dead);
+        notifyCentralEvent(eventType, data);
+    }
+
+    private static String handleMonitoringStream(HttpExchange exchange) {
+        try {
+            setCORS(exchange);
+            com.sun.net.httpserver.Headers respHeaders = exchange.getResponseHeaders();
+            respHeaders.set("Content-Type", "text/event-stream; charset=UTF-8");
+            respHeaders.set("Cache-Control", "no-cache, no-transform");
+            respHeaders.set("Connection", "keep-alive");
+            respHeaders.set("X-Accel-Buffering", "no");
+
+            exchange.sendResponseHeaders(200, 0);
+            OutputStream os = exchange.getResponseBody();
+            SseClient client = new SseClient(exchange, os);
+            sseClients.add(client);
+
+            Map<String, Object> init = new LinkedHashMap<>();
+            init.put("type", "connected");
+            init.put("labId", LAB_ID);
+            init.put("serverTime", Instant.now().toString());
+            init.put("activeSessionId", RuntimeState.activeSessionId);
+            client.send("connected", Json.stringify(init));
+            return null;
+        } catch (Exception e) {
+            System.err.println("[LabServer] SSE stream initialization error: " + e.getMessage());
+            return null;
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static String handleMonitoringSessions(HttpExchange exchange, String normPath) {
         long now = getEffectiveTime(exchange, null);
@@ -2086,13 +2779,45 @@ public final class LabServer {
         mon.put("interruptedStudentsCount", interruptedCount);
         mon.put("pendingRecoveryCount", pendingRecovery);
         mon.put("activeLabComputers", activeComputers.size());
-        mon.put("totalSuspiciousEvents", RuntimeState.suspiciousEvents.size());
+        List<Map<String, Object>> normSuspicious = new ArrayList<>();
+        for (Map<String, Object> se : RuntimeState.suspiciousEvents) {
+            Map<String, Object> copy = new LinkedHashMap<>(se);
+            String eId = String.valueOf(copy.getOrDefault("id", copy.getOrDefault("eventId", "SEC-01")));
+            String sUsn = String.valueOf(copy.getOrDefault("usn", copy.getOrDefault("studentUsn", "UNKNOWN")));
+            copy.put("id", eId);
+            copy.put("eventId", eId);
+            copy.put("usn", sUsn);
+            copy.put("studentUsn", sUsn);
+            if (!copy.containsKey("studentName") || copy.get("studentName") == null) {
+                Map<String, Object> rst = RuntimeState.roster.get(sUsn);
+                copy.put("studentName", rst != null ? rst.get("fullName") : sUsn);
+            }
+            if (!copy.containsKey("examinationCode") || copy.get("examinationCode") == null) {
+                copy.put("examinationCode", "EXAM-" + subCode + "-" + examId);
+            }
+            if (!copy.containsKey("examinationId") || copy.get("examinationId") == null) {
+                copy.put("examinationId", String.valueOf(examId));
+            }
+            if (!copy.containsKey("sessionId") || copy.get("sessionId") == null) {
+                copy.put("sessionId", String.valueOf(examId));
+            }
+            if (!copy.containsKey("sittingName") || copy.get("sittingName") == null) {
+                copy.put("sittingName", "MORNING".equalsIgnoreCase(sitCode) ? "Morning Sitting" : "Afternoon Sitting");
+            }
+            boolean isRes = Boolean.TRUE.equals(copy.get("resolved"));
+            if (!copy.containsKey("lockStatus") || copy.get("lockStatus") == null || String.valueOf(copy.get("lockStatus")).isBlank()) {
+                copy.put("lockStatus", isRes ? "Unlocked by Authorised Invigilator" : "Locked - Awaiting Invigilator");
+            }
+            normSuspicious.add(copy);
+        }
+
+        mon.put("totalSuspiciousEvents", normSuspicious.size());
         mon.put("lockedStudentsCount", lockedCount);
         mon.put("invigilatorUnlockCount", unlockCount);
         mon.put("pcRecoveryCount", RuntimeState.sessionTransfers.size());
         mon.put("students", students);
-        mon.put("suspiciousEvents", RuntimeState.suspiciousEvents);
-        mon.put("pcRecoveryEvents", RuntimeState.pcRecoveryEvents);
+        mon.put("suspiciousEvents", normSuspicious);
+        mon.put("pcRecoveryEvents", RuntimeState.pcRecoveryEvents != null ? RuntimeState.pcRecoveryEvents : Collections.emptyList());
         return mon;
     }
 
@@ -2484,32 +3209,212 @@ public final class LabServer {
     private static String handleRecordUnlockEvent(HttpExchange exchange, Map<String, Object> form) {
         String usn = String.valueOf(form.getOrDefault("studentUsn", "")).trim().toUpperCase(Locale.ROOT);
         String pc = String.valueOf(form.getOrDefault("pcNumber", "LAB01-PC-01")).trim();
+        String uid = "UNLK-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
         Map<String, Object> rec = new LinkedHashMap<>();
-        rec.put("id", "UNLK-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT));
+        rec.put("id", uid);
+        rec.put("eventId", uid);
         rec.put("studentUsn", usn);
+        rec.put("usn", usn);
+        Map<String, Object> stud = RuntimeState.roster.get(usn);
+        rec.put("studentName", stud != null ? stud.get("fullName") : usn);
         rec.put("pcNumber", pc);
         rec.put("eventType", form.getOrDefault("eventType", "WINDOW_BLUR"));
         rec.put("recordedAt", Instant.now().toString());
+        rec.put("timestamp", Instant.now().toString());
         rec.put("resolved", true);
+        rec.put("lockStatus", "Unlocked by Authorised Invigilator");
         rec.put("invigilatorIdentity", form.getOrDefault("invigilatorIdentity", "Chief Invigilator"));
+        rec.put("unlockTime", Instant.now().toString());
+        rec.put("unlockReason", form.getOrDefault("reason", "Approved Invigilator Unlock"));
+        rec.put("examinationId", String.valueOf(RuntimeState.activeSessionId));
+        rec.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+        rec.put("examinationCode", "EXAM-" + RuntimeState.activeSessionId);
+        rec.put("sittingName", RuntimeState.activeSittingName != null ? RuntimeState.activeSittingName : "MORNING");
         RuntimeState.suspiciousEvents.add(rec);
         return Json.stringify(rec);
+    }
+
+    private static String handleRevokeUnlockCredential(HttpExchange exchange, Map<String, Object> form) {
+        long examId = parseLongSafe(form.get("examinationId"));
+        String sitting = String.valueOf(form.getOrDefault("sittingName", form.getOrDefault("sittingCode", "MORNING"))).toUpperCase(Locale.ROOT);
+        String sittingKey = (examId > 0 ? (examId + ":") : "") + sitting;
+
+        // Verify Central Digital Signature for authenticated revocation
+        if (centralPublicKey == null) {
+            throw new LabException(500, "Central RSA Public Key not configured on Lab Server", "MISSING_CENTRAL_KEY");
+        }
+        String sigHex = String.valueOf(form.getOrDefault("signatureHex", "")).trim();
+        String expectedPayload = examId + ":" + sitting + ":REVOKE";
+        if (sigHex.isBlank() || !verifySignature(expectedPayload.getBytes(StandardCharsets.UTF_8), sigHex, centralPublicKey)) {
+            System.err.println("[LabSecurity REJECTED] Unsigned or forged unlock credential revocation attempt for exam " + examId + " sitting " + sitting);
+            throw new LabException(401, "Unauthorized: Invalid Central Backend digital signature for revocation", "UNAUTHORIZED_REVOCATION_SIGNATURE");
+        }
+
+        Map<String, Object> ver = RuntimeState.sittingUnlockVerifiers.computeIfAbsent(sittingKey, k -> {
+            Map<String, Object> nv = new LinkedHashMap<>();
+            nv.put("examinationId", examId);
+            nv.put("sittingName", sitting);
+            nv.put("revision", 999999);
+            return nv;
+        });
+        ver.put("isRevoked", true);
+        ver.put("revokedAt", Instant.now().toString());
+
+        Map<String, Object> sitVer = RuntimeState.sittingUnlockVerifiers.computeIfAbsent(sitting, k -> new LinkedHashMap<>(ver));
+        sitVer.put("isRevoked", true);
+        sitVer.put("revokedAt", Instant.now().toString());
+
+        if (RuntimeState.sessionMetadata.containsKey("sessionUnlockVerifier")) {
+            Object oldV = RuntimeState.sessionMetadata.get("sessionUnlockVerifier");
+            if (oldV instanceof Map<?, ?> ov) {
+                ((Map<String, Object>) ov).put("isRevoked", true);
+            }
+        }
+        RuntimeState.sessionMetadata.remove("invigilatorPassword");
+
+        // Durably save revoked state to disk immediately
+        try {
+            saveUnlockVerifiersToDisk();
+        } catch (Exception ex) {
+            System.err.println("[LabStorage ERROR] Failed to durably persist revocation: " + ex.getMessage());
+            throw new LabException(500, "Failed to durably persist revocation", "PERSISTENCE_FAILED");
+        }
+
+        System.out.println("[LabServer] Credential revoked and durably persisted for exam " + examId + " sitting " + sitting);
+        return Json.stringify(Map.of("success", true, "message", "Credential revoked successfully"));
+    }
+
+    private static String handleProvisionUnlockCredential(HttpExchange exchange, Map<String, Object> form) {
+        long examId = parseLongSafe(form.get("examinationId"));
+        String sitting = String.valueOf(form.getOrDefault("sittingName", form.getOrDefault("sittingCode", "MORNING"))).toUpperCase(Locale.ROOT);
+        String hash = String.valueOf(form.getOrDefault("verifierHash", "")).trim();
+        String salt = String.valueOf(form.getOrDefault("salt", "")).trim();
+        int iters = (int) parseLongSafe(form.getOrDefault("iterations", 600000));
+        int rev = (int) parseLongSafe(form.getOrDefault("revision", 1));
+
+        if (hash.isBlank() || salt.isBlank()) {
+            throw new LabException(400, "Missing verifier hash or salt", "INVALID_PROVISIONING_PAYLOAD");
+        }
+
+        // Verify Central RSA Digital Signature on incoming provisioning request
+        if (centralPublicKey == null) {
+            throw new LabException(500, "Central RSA Public Key not configured on Lab Server", "MISSING_CENTRAL_KEY");
+        }
+        String sigHex = String.valueOf(form.getOrDefault("signatureHex", "")).trim();
+        String expectedPayload = examId + ":" + sitting + ":" + rev + ":" + hash + ":" + salt + ":" + iters;
+        if (sigHex.isBlank() || !verifySignature(expectedPayload.getBytes(StandardCharsets.UTF_8), sigHex, centralPublicKey)) {
+            System.err.println("[LabSecurity REJECTED] Unsigned or forged unlock credential provisioning attempt for exam " + examId + " sitting " + sitting);
+            throw new LabException(401, "Unauthorized: Invalid Central Backend digital signature", "UNAUTHORIZED_CENTRAL_SIGNATURE");
+        }
+
+        // Replay and older revision protection
+        String sittingKey = (examId > 0 ? (examId + ":") : "") + sitting;
+        Map<String, Object> existing = RuntimeState.sittingUnlockVerifiers.get(sittingKey);
+        if (existing != null) {
+            int existingRev = (int) parseLongSafe(existing.get("revision"));
+            if (rev <= existingRev) {
+                System.err.println("[LabSecurity REJECTED] Replayed or obsolete revision: incoming=" + rev + " <= existing=" + existingRev);
+                throw new LabException(409, "Rejected obsolete or replayed credential revision (" + rev + " <= " + existingRev + ")", "OBSOLETE_REVISION");
+            }
+        }
+
+        Map<String, Object> ver = new LinkedHashMap<>();
+        ver.put("examinationId", examId);
+        ver.put("sittingName", sitting);
+        ver.put("verifierHash", hash);
+        ver.put("salt", salt);
+        ver.put("iterations", iters);
+        ver.put("revision", rev);
+        ver.put("isRevoked", false);
+        ver.put("provisionedAt", Instant.now().toString());
+        ver.put("signatureHex", sigHex);
+
+        RuntimeState.sittingUnlockVerifiers.put(sittingKey, ver);
+        RuntimeState.sittingUnlockVerifiers.put(sitting, ver);
+        if (examId > 0) {
+            RuntimeState.sittingUnlockVerifiers.put(String.valueOf(examId), ver);
+        }
+
+        RuntimeState.sessionMetadata.put("sessionUnlockVerifier", ver);
+        RuntimeState.sessionMetadata.remove("invigilatorPassword");
+
+        // Durably save to local persistent disk BEFORE returning signed acknowledgment
+        try {
+            saveUnlockVerifiersToDisk();
+            broadcastSseEvent("credential_synced", Map.of(
+                "eventType", "CREDENTIAL_SYNCED",
+                "examId", examId,
+                "sitting", sitting,
+                "revision", rev,
+                "labId", LAB_ID
+            ));
+        } catch (Exception ex) {
+            System.err.println("[LabStorage ERROR] Failed to durably persist unlock verifier: " + ex.getMessage());
+            throw new LabException(500, "Failed to durably persist credential to disk", "PERSISTENCE_FAILED");
+        }
+
+        // Sign acknowledgment: "<examId>:<sitting>:<rev>:PROVISIONED:<hash>"
+        String ackMessage = examId + ":" + sitting + ":" + rev + ":PROVISIONED:" + hash;
+        String signatureHex = "";
+        try {
+            if (labPrivateKey != null) {
+                signatureHex = sign(ackMessage.getBytes(StandardCharsets.UTF_8), labPrivateKey);
+            }
+        } catch (Exception ex) {
+            System.err.println("[LabServer] Failed to sign provisioning ack: " + ex.getMessage());
+        }
+
+        System.out.println("[LabServer] Successfully provisioned and durably persisted unlock credential for examination " + examId + " sitting " + sitting + " (revision: " + rev + ")");
+
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("success", true);
+        resp.put("examinationId", examId);
+        resp.put("sittingName", sitting);
+        resp.put("revision", rev);
+        resp.put("signatureHex", signatureHex);
+        resp.put("ackMessage", ackMessage);
+        resp.put("message", "Unlock credential provisioned and durably saved successfully");
+        return Json.stringify(resp);
     }
 
     private static String handlePackageActivate(HttpExchange exchange, Map<String, Object> form) {
         long examId = parseLongSafe(form.get("examinationId"));
         String pkgUid = String.valueOf(form.getOrDefault("packageUid", "")).trim();
+        String sitCode = String.valueOf(form.getOrDefault("sittingCode", form.getOrDefault("sitting", ""))).trim().toUpperCase(Locale.ROOT);
         Map<String, Object> target = null;
-        for (Map<String, Object> p : RuntimeState.packages.values()) {
-            if (examId > 0 && parseLongSafe(p.get("examinationId")) == examId) {
-                target = p;
-                break;
-            }
-            if (!pkgUid.isEmpty() && pkgUid.equalsIgnoreCase(String.valueOf(p.get("packageUid")))) {
-                target = p;
-                break;
+
+        // 1. Exact package UID match
+        if (!pkgUid.isEmpty()) {
+            for (Map<String, Object> p : RuntimeState.packages.values()) {
+                if (pkgUid.equalsIgnoreCase(String.valueOf(p.get("packageUid")))) {
+                    target = p;
+                    break;
+                }
             }
         }
+
+        // 2. Exam ID and Sitting match
+        if (target == null && examId > 0 && !sitCode.isEmpty()) {
+            for (Map<String, Object> p : RuntimeState.packages.values()) {
+                long pEid = parseLongSafe(p.get("examinationId"));
+                String pSit = String.valueOf(p.get("sittingCode")).toUpperCase(Locale.ROOT);
+                if (pEid == examId && (pSit.contains(sitCode) || sitCode.contains(pSit))) {
+                    target = p;
+                    break;
+                }
+            }
+        }
+
+        // 3. Fallback to Exam ID alone
+        if (target == null && examId > 0) {
+            for (Map<String, Object> p : RuntimeState.packages.values()) {
+                if (parseLongSafe(p.get("examinationId")) == examId) {
+                    target = p;
+                    break;
+                }
+            }
+        }
+
         if (target != null) {
             activatePackageIntoMemory(target);
             return Json.stringify(Map.of("success", true, "activatedSessionId", RuntimeState.activeSessionId, "sitting", RuntimeState.activeSittingName));
@@ -2535,21 +3440,27 @@ public final class LabServer {
             }
         }
 
-        if (RuntimeState.roster.isEmpty()) {
+        if (RuntimeState.roster.isEmpty() && RuntimeState.activeCohorts.isEmpty()) {
             throw new LabException(400, "No active exam roster loaded to finalize results", "NO_ROSTER");
         }
 
         long examId = formExamId != null ? parseLongSafe(formExamId) : (RuntimeState.activeSessionId != null ? RuntimeState.activeSessionId : 0L);
-        String sitCode = formSitCode != null ? String.valueOf(formSitCode).toUpperCase(Locale.ROOT) : (RuntimeState.activeSittingName != null ? RuntimeState.activeSittingName : "MORNING");
-        Map<String, Object> meta = RuntimeState.sessionMetadata;
+        CohortState cohort = RuntimeState.activeCohorts.get(examId);
+        String sitCode = formSitCode != null ? String.valueOf(formSitCode).toUpperCase(Locale.ROOT) : (cohort != null && cohort.sittingName != null ? cohort.sittingName : (RuntimeState.activeSittingName != null ? RuntimeState.activeSittingName : "MORNING"));
 
-        String dept = (String) meta.getOrDefault("department", "CSE");
+        Map<String, Map<String, Object>> targetRoster = (cohort != null && !cohort.roster.isEmpty()) ? cohort.roster : RuntimeState.roster;
+        Map<String, Object> meta = (cohort != null && !cohort.sessionMetadata.isEmpty()) ? cohort.sessionMetadata : RuntimeState.sessionMetadata;
+        Map<String, Integer> targetAnswerKeys = (cohort != null && !cohort.answerKeys.isEmpty()) ? cohort.answerKeys : RuntimeState.answerKeys;
+        Map<String, Map<String, Object>> targetVersions = (cohort != null && !cohort.versions.isEmpty()) ? cohort.versions : RuntimeState.versions;
+        Map<String, String> targetStudentVersion = (cohort != null && !cohort.studentAssignedVersion.isEmpty()) ? cohort.studentAssignedVersion : RuntimeState.studentAssignedVersion;
+
+        String dept = (String) meta.getOrDefault("department", meta.getOrDefault("departmentCode", "CSE"));
         int semester = (int) parseLongSafe(meta.getOrDefault("semester", 5));
         String subCode = (String) meta.getOrDefault("subjectCode", "21CS51");
         String subName = (String) meta.getOrDefault("subjectName", "Computer Networks");
         String cycle = (String) meta.getOrDefault("cycleName", "2026-DEC");
 
-        int totalCandidates = RuntimeState.roster.size();
+        int totalCandidates = targetRoster.size();
         int attended = 0;
         int absent = 0;
         double totalMarksSum = 0;
@@ -2560,7 +3471,7 @@ public final class LabServer {
 
         List<Map<String, Object>> studentResults = new ArrayList<>();
 
-        for (Map.Entry<String, Map<String, Object>> entry : RuntimeState.roster.entrySet()) {
+        for (Map.Entry<String, Map<String, Object>> entry : targetRoster.entrySet()) {
             String usn = entry.getKey();
             Map<String, Object> details = entry.getValue();
             String subKey = examId + ":" + usn;
@@ -2573,13 +3484,13 @@ public final class LabServer {
             }
 
             String section = (String) details.getOrDefault("originalSection", details.getOrDefault("section", "A"));
-            String version = RuntimeState.studentAssignedVersion.getOrDefault(usn, "A");
+            String version = targetStudentVersion.getOrDefault(usn, "A");
 
             if (isSubmitted) {
                 attended++;
                 Map<String, Object> ansMap = RuntimeState.studentAnswers.getOrDefault(usn, Collections.emptyMap());
 
-                Map<String, Object> verObj = RuntimeState.versions.get(version);
+                Map<String, Object> verObj = targetVersions.get(version);
                 List<?> qList = verObj != null ? (List<?>) verObj.get("questions") : Collections.emptyList();
                 int totalQ = qList != null && !qList.isEmpty() ? qList.size() : 25;
 
@@ -2590,10 +3501,16 @@ public final class LabServer {
                 for (Object qo : qList) {
                     if (qo instanceof Map<?, ?> qm) {
                         String qUid = String.valueOf(qm.get("questionUid"));
-                        Integer expected = RuntimeState.answerKeys.get(qUid + ":" + version);
-                        if (expected == null) expected = RuntimeState.answerKeys.get(qUid);
+                        Integer expected = targetAnswerKeys.get(qUid + ":" + version);
+                        if (expected == null) expected = targetAnswerKeys.get(qUid);
 
                         Object ansRec = ansMap.get(qUid);
+                        if (ansRec == null && qm.containsKey("display_position")) {
+                            ansRec = ansMap.get(String.valueOf(qm.get("display_position")));
+                        }
+                        if (ansRec == null && qm.containsKey("position")) {
+                            ansRec = ansMap.get(String.valueOf(qm.get("position")));
+                        }
                         String chosenOpt = null;
                         if (ansRec instanceof Map<?, ?> am) {
                             chosenOpt = (String) am.get("selectedOption");
@@ -2636,6 +3553,8 @@ public final class LabServer {
                 sr.put("section", section);
                 sr.put("attendanceStatus", "Present");
                 sr.put("submissionStatus", subStatus);
+                sr.put("status", subStatus);
+                sr.put("version", version);
                 sr.put("assignedVersion", version);
                 sr.put("startedAt", sess != null ? Instant.ofEpochMilli(parseLongSafe(sess.get("startedAtMs"))).toString() : null);
                 sr.put("submittedAt", Instant.ofEpochMilli(RuntimeState.studentSubmissions.get(subKey)).toString());
@@ -2656,6 +3575,8 @@ public final class LabServer {
                     sr.put("section", section);
                     sr.put("attendanceStatus", "Present");
                     sr.put("submissionStatus", "INCOMPLETE");
+                    sr.put("status", "INCOMPLETE");
+                    sr.put("version", version);
                     sr.put("assignedVersion", version);
                     sr.put("startedAt", Instant.ofEpochMilli(parseLongSafe(sess.get("startedAtMs"))).toString());
                     sr.put("submittedAt", null);
@@ -2674,6 +3595,8 @@ public final class LabServer {
                     sr.put("section", section);
                     sr.put("attendanceStatus", "Absent");
                     sr.put("submissionStatus", "ABSENT");
+                    sr.put("status", "ABSENT");
+                    sr.put("version", "N/A");
                     sr.put("assignedVersion", "N/A");
                     sr.put("startedAt", null);
                     sr.put("submittedAt", null);
@@ -2700,9 +3623,16 @@ public final class LabServer {
         summary.put("passPercentage", Math.round(passPercentage * 100.0) / 100.0);
 
         Map<String, Object> resultsDoc = new LinkedHashMap<>();
+        resultsDoc.put("sessionId", examId);
         resultsDoc.put("examinationId", examId);
         resultsDoc.put("sittingCode", sitCode);
         resultsDoc.put("labId", LAB_ID);
+        resultsDoc.put("totalCandidates", totalCandidates);
+        resultsDoc.put("attended", attended);
+        resultsDoc.put("absent", absent);
+        resultsDoc.put("highestMarks", Math.round(highestMarks * 100.0) / 100.0);
+        resultsDoc.put("averageMarks", Math.round(averageMarks * 100.0) / 100.0);
+        resultsDoc.put("passPercentage", Math.round(passPercentage * 100.0) / 100.0);
         resultsDoc.put("summary", summary);
         resultsDoc.put("studentResults", studentResults);
 
@@ -2720,7 +3650,7 @@ public final class LabServer {
         String resultPkgUid = "RES-PKG-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
         String createdAtIso = Instant.now().toString();
 
-        String signatureHex = sign(payloadDigest.getBytes(StandardCharsets.UTF_8), labPrivateKey);
+        String signatureHex = sign(resultsBytes, labPrivateKey);
         byte[] rawSigBytes = HexFormat.of().parseHex(signatureHex);
 
         Map<String, Object> manifest = new LinkedHashMap<>();
@@ -2760,9 +3690,23 @@ public final class LabServer {
             zos.putNextEntry(new ZipEntry("signature.bin"));
             zos.write(rawSigBytes);
             zos.closeEntry();
+
+            zos.putNextEntry(new ZipEntry("signature.sig"));
+            zos.write(rawSigBytes);
+            zos.closeEntry();
         }
 
         System.out.println("[LabServer] Generated signed .labresult package: " + zipPath.toAbsolutePath() + " (Size: " + Files.size(zipPath) + " bytes)");
+
+        try {
+            broadcastSseEvent("result_package_available", Map.of(
+                "eventType", "RESULT_PACKAGE_AVAILABLE",
+                "examinationId", examId,
+                "sitting", sitCode,
+                "fileName", zipFileName,
+                "labId", LAB_ID
+            ));
+        } catch (Exception ignored) {}
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("success", true);
@@ -2874,7 +3818,9 @@ public final class LabServer {
         Map<String, Object> err = new LinkedHashMap<>();
         err.put("success", false);
         err.put("error", msg);
+        err.put("message", msg);
         err.put("errorCode", code);
+        err.put("code", code);
         sendJson(exchange, status, err);
     }
 

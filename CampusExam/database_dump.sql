@@ -1243,7 +1243,7 @@ CREATE TABLE public.session_unlock_credential (
     expires_at timestamp with time zone NOT NULL,
     last_synced_at timestamp with time zone,
     CONSTRAINT session_unlock_credential_sitting_name_check CHECK ((sitting_name = ANY (ARRAY['MORNING'::text, 'AFTERNOON'::text]))),
-    CONSTRAINT session_unlock_credential_status_check CHECK ((status = ANY (ARRAY['Active'::text, 'Revoked'::text, 'Expired'::text, 'Superseded'::text])))
+    CONSTRAINT session_unlock_credential_status_check CHECK ((status = ANY (ARRAY['Active'::text, 'Revoked'::text, 'Expired'::text, 'Superseded'::text, 'Synchronisation Failed'::text])))
 );
 
 

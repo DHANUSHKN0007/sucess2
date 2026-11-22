@@ -120,6 +120,12 @@ const AmPmTimePicker: React.FC<AmPmTimePickerProps> = ({
   const period: 'AM' | 'PM' = h24 >= 12 ? 'PM' : 'AM';
   const hour12 = h24 % 12 === 0 ? 12 : h24 % 12;
 
+  const [minuteText, setMinuteText] = useState(minute);
+
+  useEffect(() => {
+    setMinuteText(minute);
+  }, [minute]);
+
   const updateParts = (
     newHour12: number,
     newMinute: string,
@@ -127,7 +133,25 @@ const AmPmTimePicker: React.FC<AmPmTimePickerProps> = ({
   ) => {
     let target24 = newHour12 % 12;
     if (newPeriod === 'PM') target24 += 12;
-    onChange(`${String(target24).padStart(2, '0')}:${newMinute}`);
+    const safeMin = newMinute.padStart(2, '0');
+    onChange(`${String(target24).padStart(2, '0')}:${safeMin}`);
+  };
+
+  const handleMinuteChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value.replace(/\D/g, '').slice(0, 2);
+    setMinuteText(raw);
+    if (raw === '') return;
+    const num = parseInt(raw, 10);
+    if (!isNaN(num) && num >= 0 && num <= 59) {
+      updateParts(hour12, raw.padStart(2, '0'), period);
+    }
+  };
+
+  const handleMinuteBlur = () => {
+    const num = parseInt(minuteText, 10);
+    const validMin = isNaN(num) ? '00' : String(Math.min(59, Math.max(0, num))).padStart(2, '0');
+    setMinuteText(validMin);
+    updateParts(hour12, validMin, period);
   };
 
   return (
@@ -136,7 +160,7 @@ const AmPmTimePicker: React.FC<AmPmTimePickerProps> = ({
         aria-label="Hour"
         disabled={disabled}
         value={hour12}
-        onChange={(e) => updateParts(Number(e.target.value), minute, period)}
+        onChange={(e) => updateParts(Number(e.target.value), minuteText || minute, period)}
         className="px-2.5 py-2.5 text-sm font-mono rounded-lg border border-[#D9E2EF] dark:border-[#334155] bg-white dark:bg-[#0F172A] text-[#1F2937] dark:text-slate-100 disabled:opacity-50"
       >
         {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((h) => (
@@ -146,34 +170,27 @@ const AmPmTimePicker: React.FC<AmPmTimePickerProps> = ({
         ))}
       </select>
       <span className="text-sm font-bold text-[#64748B]">:</span>
-      <select
+      <input
+        type="text"
+        inputMode="numeric"
+        pattern="[0-9]*"
+        maxLength={2}
         aria-label="Minute"
+        title="Enter minute (00-59)"
+        placeholder="MM"
         disabled={disabled}
-        value={minute}
-        onChange={(e) => updateParts(hour12, e.target.value, period)}
-        className="px-2.5 py-2.5 text-sm font-mono rounded-lg border border-[#D9E2EF] dark:border-[#334155] bg-white dark:bg-[#0F172A] text-[#1F2937] dark:text-slate-100 disabled:opacity-50"
-      >
-        {['00', '15', '30', '45'].includes(minute)
-          ? ['00', '15', '30', '45'].map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))
-          : Array.from(new Set(['00', '15', '30', '45', minute]))
-              .sort()
-              .map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-      </select>
+        value={minuteText}
+        onChange={handleMinuteChange}
+        onBlur={handleMinuteBlur}
+        className="w-14 px-2 py-2.5 text-center text-sm font-mono rounded-lg border border-[#D9E2EF] dark:border-[#334155] bg-white dark:bg-[#0F172A] text-[#1F2937] dark:text-slate-100 disabled:opacity-50 focus:outline-none focus:border-[#2563EB] focus:ring-1 focus:ring-[#2563EB]"
+      />
       <div className="inline-flex rounded-lg border border-[#D9E2EF] dark:border-[#334155] overflow-hidden bg-[#F5F7FB] dark:bg-[#0F172A]">
         {(['AM', 'PM'] as const).map((p) => (
           <button
             key={p}
             type="button"
             disabled={disabled}
-            onClick={() => updateParts(hour12, minute, p)}
+            onClick={() => updateParts(hour12, minuteText || minute, p)}
             className={`px-2.5 py-2 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50 ${
               period === p
                 ? 'bg-[#2563EB] text-white'
@@ -3650,8 +3667,12 @@ const handleConfirmDeleteDraft = async () => {
               {selectedExam.sittings.map((sit) => {
                 const cred = sessionUnlockCredentials.find(
                   (c) =>
-                    c.examinationId === selectedExam.id &&
-                    c.sittingId === sit.sittingId
+                    (String(c.examinationId) === String(selectedExam.id) || String((c as any).examination_id) === String(selectedExam.id)) &&
+                    (c.sittingId === sit.sittingId ||
+                     c.sittingId === sit.sittingName ||
+                     c.sittingName === sit.sittingName ||
+                     (c as any).sitting_name === sit.sittingName ||
+                     (sit.sittingName && c.sittingName?.toLowerCase() === sit.sittingName.toLowerCase()))
                 );
                 const labServer = labServers.find((l) => l.id === sit.labId);
                 const monitorForSit = monitors.find(

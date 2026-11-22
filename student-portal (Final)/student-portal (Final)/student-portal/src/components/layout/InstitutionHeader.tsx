@@ -26,6 +26,8 @@ export interface InstitutionHeaderProps {
   systemId?: string;
   /** Header color theme variant: 'white' (standard default) | 'blue' (institutional blue banner) */
   theme?: 'white' | 'blue';
+  /** Whether to hide the offline LAN mode / Lab Server connected indicator */
+  hideLanIndicator?: boolean;
 }
 
 /**
@@ -39,6 +41,7 @@ export const InstitutionHeader: React.FC<InstitutionHeaderProps> = ({
   className = '',
   systemId,
   theme = 'blue',
+  hideLanIndicator = false,
 }) => {
   const [imgError, setImgError] = useState(false);
   const activeSystemId =
@@ -101,7 +104,7 @@ export const InstitutionHeader: React.FC<InstitutionHeaderProps> = ({
         <div className="shrink-0 flex items-center gap-2.5 sm:gap-3.5 ml-auto sm:-mr-14 md:-mr-16 lg:-mr-20">
           {rightSlot ? (
             rightSlot
-          ) : (
+          ) : hideLanIndicator ? null : (
             <div className="flex items-center gap-2.5 sm:gap-3.5 text-xs sm:text-sm">
               <div
                 className={`w-10 h-10 sm:w-12 sm:h-12 rounded-[8px] border flex items-center justify-center shrink-0 ${

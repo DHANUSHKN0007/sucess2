@@ -13,7 +13,7 @@ import {
   SubjectInfo,
 } from '../types/examination';
 import { ACADEMIC_SEMESTERS } from '../utils/academicSemesters';
-import { apiClient, ApiError, ApiErrorKind } from '../services/apiClient';
+import { apiClient, ApiError, ApiErrorKind, getApiConfig } from '../services/apiClient';
 import { authenticationService } from '../services/authenticationService';
 import { credentialService } from '../services/credentialService';
 import { examinationService } from '../services/examinationService';
@@ -304,13 +304,96 @@ export const ExaminationProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, []);
 
   useEffect(() => {
-    if (authSession?.authenticated) {
-      refreshAll();
-    } else {
+    if (!authSession?.authenticated) {
       clearProtectedState();
       setLoading(false);
+      return;
     }
-  }, [authSession?.authenticated, refreshAll, clearProtectedState]);
+
+    refreshAll();
+
+    const config = getApiConfig();
+    const token = authSession.token || '';
+    const sseUrl = `${config.centralApiBaseUrl}/events?token=${encodeURIComponent(token)}`;
+    let es: EventSource | null = null;
+    let reconnectTimeout: any = null;
+
+    const connectSSE = () => {
+      try {
+        es = new EventSource(sseUrl);
+        
+        const handleRealtimeEvent = (data: any) => {
+          const type = data?.type || data?.eventType;
+          if (!type || type === 'CONNECTED') return;
+
+          // Trigger lightweight REST refresh of store data
+          refreshAll().catch(() => {});
+
+          if (type === 'QUESTION_SET_PUBLISHED') {
+            notify('info', 'Question Set Published', `${data.subjectCode || 'A subject'} question sets have been published by HOD.`);
+          } else if (type === 'KEY_CORRECTION_SUBMITTED') {
+            notify('info', 'Dispute Submitted', `A new answer-key correction request was submitted.`);
+          } else if (type === 'CREDENTIAL_SYNCED') {
+            notify('success', 'Credentials Synced', `Sitting unlock credential was synced to Lab Server.`);
+          } else if (type === 'RESULT_PACKAGE_AVAILABLE' || type === 'RESULTS_IMPORTED') {
+            notify('info', 'Results Updated', `Signed examination results are ready for review.`);
+          }
+        };
+
+        es.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            handleRealtimeEvent(data);
+          } catch {
+            // ping / keepalive
+          }
+        };
+
+        [
+          'QUESTION_SET_PUBLISHED',
+          'EXAMINATION_SCHEDULED',
+          'EXAMINATION_SCHEDULE_CONFIRMED',
+          'EXAMINATION_SET_SELECTED',
+          'EXAMINATION_UPDATED',
+          'EXAMINATION_CANCELLED',
+          'KEY_CORRECTION_SUBMITTED',
+          'KEY_CORRECTION_DECIDED',
+          'RESULTS_IMPORTED',
+          'RESULTS_APPROVED',
+          'RESULTS_RELEASED',
+          'UNLOCK_CREDENTIAL_UPDATED',
+          'CREDENTIAL_SYNCED',
+          'SITTING_FINALIZED',
+          'RESULT_PACKAGE_AVAILABLE',
+          'STUDENT_LOGIN',
+          'STUDENT_SUBMITTED'
+        ].forEach((evtName) => {
+          es?.addEventListener(evtName, (event: any) => {
+            try {
+              const data = JSON.parse(event.data);
+              handleRealtimeEvent(data);
+            } catch {
+              refreshAll().catch(() => {});
+            }
+          });
+        });
+
+        es.onerror = () => {
+          es?.close();
+          reconnectTimeout = setTimeout(connectSSE, 5000);
+        };
+      } catch {
+        // fail gracefully
+      }
+    };
+
+    connectSSE();
+
+    return () => {
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (es) es.close();
+    };
+  }, [authSession?.authenticated, authSession?.token, refreshAll, clearProtectedState, notify]);
 
   return (
     <ExaminationContext.Provider
