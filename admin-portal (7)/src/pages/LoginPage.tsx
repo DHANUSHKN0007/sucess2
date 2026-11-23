@@ -81,7 +81,7 @@ export const LoginPage: React.FC = () => {
   };
 
   return (
-    <div className="relative min-h-screen w-full overflow-x-hidden flex flex-col justify-between bg-[#0F1B33]">
+    <div className="relative h-screen overflow-hidden w-full flex flex-col justify-between bg-[#0F1B33]">
       {/* Full-Viewport Official MIT Mysore Building Background */}
       <div className="fixed inset-0 z-0 overflow-hidden pointer-events-none select-none bg-[#0F1B33]">
         {!bgError && (
@@ -99,11 +99,11 @@ export const LoginPage: React.FC = () => {
         />
       </div>
 
-      {/* Full-Width Solid White Institutional Header Masthead (Reference-Matched Alignment) */}
-      <header className="relative z-20 w-full bg-white dark:bg-slate-900 border-b border-[#D9E2EF] dark:border-slate-800 shadow-[0_2px_12px_rgba(15,27,51,0.1)]">
-        <div className="w-full px-4 sm:px-7 lg:px-9 pt-3.5 sm:pt-4 pb-5 sm:pb-6 lg:pb-7 flex flex-col sm:flex-row items-center gap-4 sm:gap-6">
-          {/* Enlarged Pure Circular Logo within White Header Space, Aligned Next to Text Stack */}
-          <div className="w-20 h-20 sm:w-24 sm:h-24 lg:w-[114px] lg:h-[114px] shrink-0 rounded-full overflow-hidden flex items-center justify-center">
+      {/* Full-Width Solid White Institutional Header Masthead */}
+      <header className="relative z-20 shrink-0 w-full bg-white dark:bg-slate-900 border-b border-[#D9E2EF] dark:border-slate-800 shadow-xs">
+        <div className="w-full px-4 sm:px-6 lg:px-8 py-2 sm:py-2.5 flex flex-col sm:flex-row items-center gap-2.5 sm:gap-4 lg:gap-5">
+          {/* Circular Logo within White Header Space */}
+          <div className="w-12 h-12 sm:w-16 sm:h-16 md:w-18 md:h-18 lg:w-20 lg:h-20 shrink-0 rounded-full overflow-hidden flex items-center justify-center">
             {!headerLogoError ? (
               <img
                 src={OFFICIAL_MIT_LOGO_PATH}
@@ -121,19 +121,19 @@ export const LoginPage: React.FC = () => {
 
           {/* Unified Left-Aligned Institutional Masthead Stack */}
           <div className="flex-1 min-w-0 flex flex-col justify-center text-center sm:text-left">
-            <p className="text-[11px] sm:text-xs font-semibold uppercase tracking-[0.08em] text-[#22246B] dark:text-indigo-300 font-serif leading-tight">
+            <p className="text-[10px] sm:text-xs font-semibold uppercase tracking-[0.08em] text-[#22246B] dark:text-indigo-300 font-serif leading-tight">
               Maharaja Education Trust ®, Mysuru
             </p>
 
-            <h1 className="text-xl sm:text-3xl lg:text-[38px] font-bold text-[#22246B] dark:text-white tracking-[0.015em] font-serif leading-[1.14] mt-1">
+            <h1 className="text-base sm:text-2xl lg:text-[28px] font-bold text-[#22246B] dark:text-white tracking-[0.015em] font-serif leading-tight mt-0.5">
               Maharaja Institute of Technology Mysore
             </h1>
 
-            <p className="text-xs sm:text-base lg:text-[17px] font-bold text-[#22246B] dark:text-slate-200 leading-snug mt-1">
+            <p className="text-xs sm:text-sm font-bold text-[#22246B] dark:text-slate-200 leading-snug mt-0.5">
               ಮಹಾರಾಜ ತಾಂತ್ರಿಕ ಮಹಾವಿದ್ಯಾಲಯ ಮೈಸೂರು
             </p>
 
-            <p className="text-[11px] sm:text-xs lg:text-[13px] font-bold leading-snug mt-1 font-serif">
+            <p className="text-[10px] sm:text-xs font-bold leading-snug mt-0.5 font-serif">
               <span className="text-[#E86C1F] dark:text-orange-400">
                 An Autonomous Institution Affiliated to VTU, Belagavi
               </span>
@@ -148,12 +148,12 @@ export const LoginPage: React.FC = () => {
         </div>
       </header>
 
-      {/* Vertically and Horizontally Expanded Centered Common Principal / HOD Login Card */}
-      <main className="relative z-10 flex-1 flex items-center justify-center px-4 py-6 sm:py-10">
-        <div className="w-full max-w-[445px] sm:max-w-[460px] min-h-[570px] sm:min-h-[615px] flex flex-col justify-between bg-white dark:bg-slate-900 rounded-2xl border border-[#E2E8F0] dark:border-slate-700/80 shadow-[0_24px_60px_rgba(10,18,35,0.42)] px-8 py-10 sm:px-10 sm:py-12">
+      {/* Centered Common Principal / HOD Login Card */}
+      <main className="relative z-10 flex-1 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+        <div className="w-full max-w-[420px] flex flex-col justify-between bg-white dark:bg-slate-900 rounded-2xl border border-[#E2E8F0] dark:border-slate-700/80 shadow-xl px-6 py-5 sm:px-8 sm:py-6">
           <div>
-            <div className="flex flex-col items-center text-center mb-7">
-              <div className="w-20 h-20 rounded-full overflow-hidden flex items-center justify-center mb-4">
+            <div className="flex flex-col items-center text-center mb-4">
+              <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-full overflow-hidden flex items-center justify-center mb-2">
                 {!cardLogoError ? (
                   <img
                     src={OFFICIAL_MIT_LOGO_PATH}
@@ -168,22 +168,22 @@ export const LoginPage: React.FC = () => {
                   </span>
                 )}
               </div>
-              <h2 className="text-lg sm:text-xl font-bold text-[#22246B] dark:text-white tracking-tight leading-snug">
+              <h2 className="text-base sm:text-lg font-bold text-[#22246B] dark:text-white tracking-tight leading-snug">
                 MIT Mysore Examination Management System
               </h2>
-              <p className="text-sm text-[#64748B] dark:text-slate-400 mt-1">
-                Examination Management System
+              <p className="text-xs text-[#64748B] dark:text-slate-400 mt-0.5">
+                Principal &amp; Head of Department Access
               </p>
             </div>
 
             {backendOnline === false && (
               <div
                 role="alert"
-                className="mb-5 p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-500/50 flex items-start gap-2.5 text-xs text-amber-900 dark:text-amber-200"
+                className="mb-3 p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-500/50 flex items-start gap-2 text-xs text-amber-900 dark:text-amber-200"
               >
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
                 <span className="leading-relaxed font-medium">
-                  <strong>Central Backend Disconnected:</strong> The backend server ({API_CONFIG.baseUrl}) is not reachable. Sign in is disabled until connected.
+                  <strong>Central Backend Disconnected:</strong> The backend server ({API_CONFIG.baseUrl}) is not reachable.
                 </span>
               </div>
             )}
@@ -191,18 +191,18 @@ export const LoginPage: React.FC = () => {
             {errorMessage && (
               <div
                 role="alert"
-                className="mb-5 p-3 rounded-lg bg-[#B42318]/10 dark:bg-red-950/40 border border-[#B42318]/30 dark:border-red-800 flex items-start gap-2.5 text-xs text-[#B42318] dark:text-red-300"
+                className="mb-3 p-2.5 rounded-lg bg-[#B42318]/10 dark:bg-red-950/40 border border-[#B42318]/30 dark:border-red-800 flex items-start gap-2 text-xs text-[#B42318] dark:text-red-300"
               >
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                 <span className="leading-relaxed font-medium">{errorMessage}</span>
               </div>
             )}
 
-            <form onSubmit={handleSubmit} noValidate className="space-y-5">
+            <form onSubmit={handleSubmit} noValidate className="space-y-3.5">
               <div>
                 <label
                   htmlFor="admin-username"
-                  className="block text-xs sm:text-sm font-semibold text-[#1F2937] dark:text-slate-200 mb-1.5"
+                  className="block text-xs font-semibold text-[#1F2937] dark:text-slate-200 mb-1"
                 >
                   Username
                 </label>
@@ -214,14 +214,14 @@ export const LoginPage: React.FC = () => {
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder="Enter your username"
                   disabled={isSubmitting}
-                  className="w-full px-3.5 py-3 text-sm rounded-lg border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#1F2937] dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#25287A]/25 focus:border-[#25287A] transition-colors"
+                  className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#1F2937] dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#25287A]/25 focus:border-[#25287A] transition-colors"
                 />
               </div>
 
               <div>
                 <label
                   htmlFor="admin-password"
-                  className="block text-xs sm:text-sm font-semibold text-[#1F2937] dark:text-slate-200 mb-1.5"
+                  className="block text-xs font-semibold text-[#1F2937] dark:text-slate-200 mb-1"
                 >
                   Password
                 </label>
@@ -234,12 +234,12 @@ export const LoginPage: React.FC = () => {
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Enter your password"
                     disabled={isSubmitting}
-                    className="w-full pl-3.5 pr-10 py-3 text-sm rounded-lg border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#1F2937] dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#25287A]/25 focus:border-[#25287A] transition-colors"
+                    className="w-full pl-3.5 pr-10 py-2.5 text-sm rounded-lg border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#1F2937] dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-[#25287A]/25 focus:border-[#25287A] transition-colors"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword((prev) => !prev)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#64748B] dark:text-slate-400 hover:text-[#1F2937] dark:hover:text-white"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#64748B] dark:text-slate-400 hover:text-[#1F2937] dark:hover:text-white p-1"
                     aria-label={showPassword ? 'Hide password' : 'Show password'}
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -250,7 +250,7 @@ export const LoginPage: React.FC = () => {
               <button
                 type="submit"
                 disabled={isSubmitting || backendOnline === false}
-                className="w-full mt-2 py-3 px-4 rounded-lg bg-[#25287A] hover:bg-[#1D2063] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold shadow-xs transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full mt-2 py-2.5 sm:py-3 px-4 rounded-lg bg-[#25287A] hover:bg-[#1D2063] dark:bg-[#2563EB] dark:hover:bg-[#1D4ED8] text-white text-sm font-semibold shadow-xs transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
                 {isSubmitting ? (
                   <>
@@ -266,7 +266,7 @@ export const LoginPage: React.FC = () => {
             </form>
           </div>
 
-          <div className="mt-7 pt-4 border-t border-[#E2E8F0] dark:border-slate-800 text-center">
+          <div className="mt-5 pt-3 border-t border-[#E2E8F0] dark:border-slate-800 text-center">
             <p className="text-xs font-medium text-[#475569] dark:text-slate-300">
               For Principal / HOD Access Only
             </p>
@@ -274,8 +274,8 @@ export const LoginPage: React.FC = () => {
         </div>
       </main>
 
-      {/* Clean Institutional Footer (no hardcoded year, no demo text) */}
-      <footer className="relative z-10 w-full py-3 px-4 text-center text-xs font-medium text-white/90 drop-shadow-xs">
+      {/* Clean Institutional Footer */}
+      <footer className="relative z-10 shrink-0 w-full py-2 px-4 text-center text-xs font-medium text-white/90 drop-shadow-xs">
         Maharaja Institute of Technology Mysore · Administrative Examination Portal
       </footer>
     </div>

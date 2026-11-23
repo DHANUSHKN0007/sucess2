@@ -722,6 +722,40 @@ export interface SittingQuestionPaperArchive {
   archivedAt?: string;
   availabilityMessage?: string;
   preservedVersions?: ArchivedPaperVersionRecord[];
+  downloadUrl?: string;
+  excelDownloadUrl?: string;
+  dataUrl?: string;
+  rawSittingName?: string;
+}
+
+export interface ArchivedQuestionItem {
+  serialNumber: number;
+  moduleNumber: number;
+  originalQuestionNumber: string;
+  prompt: string;
+  optionA: string;
+  optionB: string;
+  optionC: string;
+  optionD: string;
+  correctAnswer: string;
+  correctAnswerText: string;
+  marks: number;
+  questionType: string;
+  explanation?: string;
+}
+
+export interface ArchivedAnswerKeyItem {
+  questionNumber: number;
+  moduleNumber: number;
+  correctOption: string;
+  correctAnswerText: string;
+  marks: number;
+}
+
+export interface ArchivedQuestionSetData {
+  metadata: Record<string, any>;
+  questions: ArchivedQuestionItem[];
+  answerKey: ArchivedAnswerKeyItem[];
 }
 
 // ============================================================================

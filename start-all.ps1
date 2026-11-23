@@ -36,7 +36,7 @@ Write-Host "  STARTING MIT MYSORE EXAMINATION SYSTEM (Mode: $Mode)" -ForegroundC
 Write-Host "====================================================================" -ForegroundColor Cyan
 
 # 2. CHECK / TERMINATE STALE PROCESSES ON TARGET PORTS
-$targetPorts = @(8081, 8082, 3000, 3001, 3002)
+$targetPorts = @(8081, 8082, 3000, 3001, 3002, 5001)
 foreach ($p in $targetPorts) {
     $conns = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
     if ($conns) {
@@ -110,17 +110,24 @@ $pids["AdminPortal"] = $adminProc.Id
 Write-Host "  [OK] Admin / HOD Portal started (PID: $($adminProc.Id))" -ForegroundColor Green
 
 # 7. START STUDENT PORTAL (Port 3002)
-Write-Host "`n[5/5] Starting Student Portal on port 3002..." -ForegroundColor Yellow
+Write-Host "`n[5/6] Starting Student Portal on port 3002..." -ForegroundColor Yellow
 $studentCmd = "& { `$env:VITE_LAB_API_BASE_URL = 'http://${displayHost}:8082'; `$env:VITE_API_URL = 'http://${displayHost}:8082'; Set-Location '$scriptRoot\student-portal (Final)\student-portal (Final)\student-portal'; npm.cmd run dev -- --port 3002 --host 0.0.0.0 }"
 $studentProc = Start-Process powershell.exe -ArgumentList "-NoProfile", "-Command", $studentCmd -PassThru -WindowStyle Hidden
 $pids["StudentPortal"] = $studentProc.Id
 Write-Host "  [OK] Student Portal started (PID: $($studentProc.Id))" -ForegroundColor Green
 
+# 8. START DOCUMENT CONVERTER SERVER (Port 5001)
+Write-Host "`n[6/6] Starting Document Converter Server on port 5001..." -ForegroundColor Yellow
+$converterCmd = "& { `$env:PORT = '5001'; Set-Location '$scriptRoot\admin-portal (7)\server\converter'; node server.js }"
+$converterProc = Start-Process powershell.exe -ArgumentList "-NoProfile", "-Command", $converterCmd -PassThru -WindowStyle Hidden
+$pids["ConverterServer"] = $converterProc.Id
+Write-Host "  [OK] Document Converter Server started (PID: $($converterProc.Id))" -ForegroundColor Green
+
 # Save running PIDs to JSON
 $pidsPath = Join-Path $scriptRoot ".running_pids.json"
 $pids | ConvertTo-Json | Set-Content -Path $pidsPath -Encoding UTF8
 
-# 8. WAIT FOR HEALTH CHECKS
+# 9. WAIT FOR HEALTH CHECKS
 Write-Host "`nWaiting for service health checks..." -ForegroundColor Yellow
 $healthy = $false
 $retries = 0
@@ -156,6 +163,7 @@ Write-Host "  4. Principal Portal:       http://${displayHost}:3000/principal" -
 Write-Host "     Credentials:            principal / PRINCIPAL@7658 (or Admin@123)" -ForegroundColor Gray
 Write-Host "  5. Central Backend API:    http://${displayHost}:8081" -ForegroundColor White
 Write-Host "  6. Lab Server API:         http://${displayHost}:8082/health" -ForegroundColor White
+Write-Host "  7. Document Converter API: http://${displayHost}:5001/api/health" -ForegroundColor White
 Write-Host "====================================================================" -ForegroundColor Green
 Write-Host "  To stop all services:      .\stop-all.ps1" -ForegroundColor Cyan
 Write-Host "  To check service status:   .\status.ps1" -ForegroundColor Cyan

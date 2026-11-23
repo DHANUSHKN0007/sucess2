@@ -158,6 +158,142 @@
   },
   "conversionRecords": [
     {
+      "id": "conv_1795404131370_229g0",
+      "department": "CSE",
+      "originalFilename": "Drug Discovery MCQ Question Bank (2).pdf",
+      "storedFilename": "conv_1795404131370_229g0_Drug Discovery MCQ Question Bank (2).pdf",
+      "originalFilePath": "C:\\Users\\Dhanush K N\\Downloads\\ALL 3 PORTALS\\admin-portal (7)\\server\\uploads\\originals\\conv_1795404131370_229g0_Drug Discovery MCQ Question Bank (2).pdf",
+      "documentType": "question_paper",
+      "destinationTemplate": "QUESTION_PAPER",
+      "fileFormat": "pdf",
+      "fileSize": 186812,
+      "uploadTime": "2026-11-23T03:22:12.459Z",
+      "uploadedBy": "COE Administrator",
+      "status": "awaiting_correction",
+      "errorDetails": "No questions could be extracted from this document.",
+      "metadata": {
+        "semester": 5,
+        "subjectName": "",
+        "subjectCode": "",
+        "department": "CSE",
+        "totalItems": 0
+      },
+      "stats": {
+        "totalItems": 0,
+        "validCount": 0,
+        "errorCount": 1,
+        "warningCount": 0,
+        "confidenceScore": 0
+      },
+      "stepLogs": [
+        {
+          "step": 1,
+          "title": "Receive source file and validate destination template",
+          "timestamp": "2026-11-23T03:22:11.370Z",
+          "filename": "Drug Discovery MCQ Question Bank (2).pdf",
+          "size": 186812,
+          "destinationTemplate": "QUESTION_PAPER"
+        },
+        {
+          "step": 2,
+          "title": "Store original document securely",
+          "timestamp": "2026-11-23T03:22:11.370Z"
+        },
+        {
+          "step": 3,
+          "title": "Ingest document and execute format-specific extraction",
+          "timestamp": "2026-11-23T03:22:11.373Z"
+        },
+        {
+          "step": 4,
+          "title": "Extraction complete",
+          "timestamp": "2026-11-23T03:22:12.457Z",
+          "method": "digital",
+          "durationMs": 1084,
+          "warningsCount": 0
+        },
+        {
+          "step": 5,
+          "title": "Intelligently map extracted content to Institutional Question Paper Template",
+          "timestamp": "2026-11-23T03:22:12.457Z"
+        },
+        {
+          "step": 6,
+          "title": "Execute template-specific validation checks",
+          "timestamp": "2026-11-23T03:22:12.459Z"
+        }
+      ],
+      "exportHistory": []
+    },
+    {
+      "id": "conv_1795379422814_ooglw",
+      "department": "CSE",
+      "originalFilename": "Drug Discovery MCQ Question Bank (2).pdf",
+      "storedFilename": "conv_1795379422814_ooglw_Drug Discovery MCQ Question Bank (2).pdf",
+      "originalFilePath": "C:\\Users\\Dhanush K N\\Downloads\\ALL 3 PORTALS\\admin-portal (7)\\server\\uploads\\originals\\conv_1795379422814_ooglw_Drug Discovery MCQ Question Bank (2).pdf",
+      "documentType": "question_paper",
+      "destinationTemplate": "QUESTION_PAPER",
+      "fileFormat": "pdf",
+      "fileSize": 186812,
+      "uploadTime": "2026-11-22T20:30:23.859Z",
+      "uploadedBy": "COE Administrator",
+      "status": "awaiting_correction",
+      "errorDetails": "No questions could be extracted from this document.",
+      "metadata": {
+        "semester": 5,
+        "subjectName": "",
+        "subjectCode": "",
+        "department": "CSE",
+        "totalItems": 0
+      },
+      "stats": {
+        "totalItems": 0,
+        "validCount": 0,
+        "errorCount": 1,
+        "warningCount": 0,
+        "confidenceScore": 0
+      },
+      "stepLogs": [
+        {
+          "step": 1,
+          "title": "Receive source file and validate destination template",
+          "timestamp": "2026-11-22T20:30:22.815Z",
+          "filename": "Drug Discovery MCQ Question Bank (2).pdf",
+          "size": 186812,
+          "destinationTemplate": "QUESTION_PAPER"
+        },
+        {
+          "step": 2,
+          "title": "Store original document securely",
+          "timestamp": "2026-11-22T20:30:22.815Z"
+        },
+        {
+          "step": 3,
+          "title": "Ingest document and execute format-specific extraction",
+          "timestamp": "2026-11-22T20:30:22.818Z"
+        },
+        {
+          "step": 4,
+          "title": "Extraction complete",
+          "timestamp": "2026-11-22T20:30:23.856Z",
+          "method": "digital",
+          "durationMs": 1038,
+          "warningsCount": 0
+        },
+        {
+          "step": 5,
+          "title": "Intelligently map extracted content to Institutional Question Paper Template",
+          "timestamp": "2026-11-22T20:30:23.856Z"
+        },
+        {
+          "step": 6,
+          "title": "Execute template-specific validation checks",
+          "timestamp": "2026-11-22T20:30:23.858Z"
+        }
+      ],
+      "exportHistory": []
+    },
+    {
       "id": "conv_1795335444536_9pk8m",
       "department": "CSE",
       "originalFilename": "demo question bank pdf (1).pdf",
@@ -50345,6 +50481,70 @@
       ],
       "recordId": "conv_1795335444536_9pk8m",
       "updatedAt": "2026-11-22T08:17:25.209Z"
+    },
+    "conv_1795379422814_ooglw": {
+      "modules": [],
+      "metadata": {
+        "semester": 5,
+        "subjectName": "",
+        "subjectCode": "",
+        "department": "CSE"
+      },
+      "verification": {
+        "totalItems": 0,
+        "validCount": 0,
+        "errorCount": 1,
+        "warningCount": 0,
+        "confidenceScore": 0
+      },
+      "templateFields": [
+        "Sl.no.",
+        "Questions",
+        "Question image",
+        "option A",
+        "option A img",
+        "option B",
+        "option B img",
+        "option C",
+        "option C img",
+        "option D ",
+        "option D  img",
+        "Key Answer"
+      ],
+      "recordId": "conv_1795379422814_ooglw",
+      "updatedAt": "2026-11-22T20:30:23.961Z"
+    },
+    "conv_1795404131370_229g0": {
+      "modules": [],
+      "metadata": {
+        "semester": 5,
+        "subjectName": "",
+        "subjectCode": "",
+        "department": "CSE"
+      },
+      "verification": {
+        "totalItems": 0,
+        "validCount": 0,
+        "errorCount": 1,
+        "warningCount": 0,
+        "confidenceScore": 0
+      },
+      "templateFields": [
+        "Sl.no.",
+        "Questions",
+        "Question image",
+        "option A",
+        "option A img",
+        "option B",
+        "option B img",
+        "option C",
+        "option C img",
+        "option D ",
+        "option D  img",
+        "Key Answer"
+      ],
+      "recordId": "conv_1795404131370_229g0",
+      "updatedAt": "2026-11-23T03:22:12.588Z"
     }
   },
   "studentLists": {},
@@ -151263,10 +151463,316 @@
       "generatedFilename": null,
       "recordId": "conv_1795335444536_9pk8m",
       "updatedAt": "2026-11-22T08:17:25.153Z"
+    },
+    "conv_1795379422814_ooglw": {
+      "envelope": {
+        "document_id": "conv_1795379422814_ooglw",
+        "source_file": {
+          "filename": "Drug Discovery MCQ Question Bank (2).pdf",
+          "format": "pdf",
+          "size": 186812,
+          "mimeType": "application/pdf",
+          "originalPath": "C:\\Users\\Dhanush K N\\Downloads\\ALL 3 PORTALS\\admin-portal (7)\\server\\uploads\\originals\\conv_1795379422814_ooglw_Drug Discovery MCQ Question Bank (2).pdf",
+          "checksum": "bd4ac07c85b7c7c15ed4cd7f7ff5151b69a07842798aa9efe401c9e1aee20048"
+        },
+        "document_type": "question_paper",
+        "extraction": {
+          "method": "digital",
+          "status": "completed",
+          "extractedAt": "2026-11-22T20:30:23.859Z",
+          "durationMs": 1038,
+          "warnings": [],
+          "errors": [],
+          "isScanned": false,
+          "pageCount": 13,
+          "sheetNames": []
+        },
+        "content": {
+          "templateId": "QUESTION_PAPER",
+          "modules": [],
+          "totalModules": 0,
+          "totalQuestions": 0,
+          "verification": {
+            "totalQuestions": 0,
+            "missingQuestionText": 0,
+            "missingOptions": 0,
+            "missingAnswers": 0,
+            "duplicateQuestionNumbers": 0,
+            "duplicateNumbersList": [],
+            "unassignedModules": 0,
+            "uncertainAnswers": 0,
+            "unreadableImages": 0,
+            "confidenceScore": 0.5,
+            "isVerificationReady": false
+          },
+          "metadata": {
+            "semester": 5,
+            "subjectName": "",
+            "subjectCode": "",
+            "totalMarks": null,
+            "duration": "",
+            "department": "CSE",
+            "totalModules": 0,
+            "totalQuestions": 0
+          },
+          "extractedImages": []
+        },
+        "metadata": {
+          "uploadedBy": "COE Administrator",
+          "department": "CSE",
+          "semester": 5,
+          "subjectName": "",
+          "subjectCode": "",
+          "createdAt": "2026-11-22T20:30:23.859Z",
+          "updatedAt": "2026-11-22T20:30:23.859Z",
+          "tags": []
+        }
+      },
+      "templateId": "QUESTION_PAPER",
+      "templateDef": {
+        "id": "QUESTION_PAPER",
+        "displayName": "Institutional Question Paper Template",
+        "standardHeaders": [
+          "Sl.no.",
+          "Questions",
+          "Question image",
+          "option A",
+          "option A img",
+          "option B",
+          "option B img",
+          "option C",
+          "option C img",
+          "option D ",
+          "option D  img",
+          "Key Answer"
+        ]
+      },
+      "mappedData": {
+        "templateId": "QUESTION_PAPER",
+        "modules": [],
+        "totalModules": 0,
+        "totalQuestions": 0,
+        "verification": {
+          "totalQuestions": 0,
+          "missingQuestionText": 0,
+          "missingOptions": 0,
+          "missingAnswers": 0,
+          "duplicateQuestionNumbers": 0,
+          "duplicateNumbersList": [],
+          "unassignedModules": 0,
+          "uncertainAnswers": 0,
+          "unreadableImages": 0,
+          "confidenceScore": 0.5,
+          "isVerificationReady": false
+        },
+        "metadata": {
+          "semester": 5,
+          "subjectName": "",
+          "subjectCode": "",
+          "totalMarks": null,
+          "duration": "",
+          "department": "CSE",
+          "totalModules": 0,
+          "totalQuestions": 0
+        },
+        "extractedImages": []
+      },
+      "validation": {
+        "isValid": false,
+        "summary": {
+          "totalItems": 0,
+          "validCount": 0,
+          "errorCount": 1,
+          "warningCount": 0,
+          "confidenceScore": 0
+        },
+        "errors": [
+          {
+            "id": "err_no_questions",
+            "code": "EMPTY_QUESTION_PAPER",
+            "message": "No questions could be extracted from this document."
+          }
+        ],
+        "warnings": [],
+        "info": []
+      },
+      "generatedBuffer": null,
+      "generatedFilename": null,
+      "recordId": "conv_1795379422814_ooglw",
+      "updatedAt": "2026-11-22T20:30:23.912Z"
+    },
+    "conv_1795404131370_229g0": {
+      "envelope": {
+        "document_id": "conv_1795404131370_229g0",
+        "source_file": {
+          "filename": "Drug Discovery MCQ Question Bank (2).pdf",
+          "format": "pdf",
+          "size": 186812,
+          "mimeType": "application/pdf",
+          "originalPath": "C:\\Users\\Dhanush K N\\Downloads\\ALL 3 PORTALS\\admin-portal (7)\\server\\uploads\\originals\\conv_1795404131370_229g0_Drug Discovery MCQ Question Bank (2).pdf",
+          "checksum": "bd4ac07c85b7c7c15ed4cd7f7ff5151b69a07842798aa9efe401c9e1aee20048"
+        },
+        "document_type": "question_paper",
+        "extraction": {
+          "method": "digital",
+          "status": "completed",
+          "extractedAt": "2026-11-23T03:22:12.459Z",
+          "durationMs": 1084,
+          "warnings": [],
+          "errors": [],
+          "isScanned": false,
+          "pageCount": 13,
+          "sheetNames": []
+        },
+        "content": {
+          "templateId": "QUESTION_PAPER",
+          "modules": [],
+          "totalModules": 0,
+          "totalQuestions": 0,
+          "verification": {
+            "totalQuestions": 0,
+            "missingQuestionText": 0,
+            "missingOptions": 0,
+            "missingAnswers": 0,
+            "duplicateQuestionNumbers": 0,
+            "duplicateNumbersList": [],
+            "unassignedModules": 0,
+            "uncertainAnswers": 0,
+            "unreadableImages": 0,
+            "confidenceScore": 0.5,
+            "isVerificationReady": false
+          },
+          "metadata": {
+            "semester": 5,
+            "subjectName": "",
+            "subjectCode": "",
+            "totalMarks": null,
+            "duration": "",
+            "department": "CSE",
+            "totalModules": 0,
+            "totalQuestions": 0
+          },
+          "extractedImages": []
+        },
+        "metadata": {
+          "uploadedBy": "COE Administrator",
+          "department": "CSE",
+          "semester": 5,
+          "subjectName": "",
+          "subjectCode": "",
+          "createdAt": "2026-11-23T03:22:12.459Z",
+          "updatedAt": "2026-11-23T03:22:12.459Z",
+          "tags": []
+        }
+      },
+      "templateId": "QUESTION_PAPER",
+      "templateDef": {
+        "id": "QUESTION_PAPER",
+        "displayName": "Institutional Question Paper Template",
+        "standardHeaders": [
+          "Sl.no.",
+          "Questions",
+          "Question image",
+          "option A",
+          "option A img",
+          "option B",
+          "option B img",
+          "option C",
+          "option C img",
+          "option D ",
+          "option D  img",
+          "Key Answer"
+        ]
+      },
+      "mappedData": {
+        "templateId": "QUESTION_PAPER",
+        "modules": [],
+        "totalModules": 0,
+        "totalQuestions": 0,
+        "verification": {
+          "totalQuestions": 0,
+          "missingQuestionText": 0,
+          "missingOptions": 0,
+          "missingAnswers": 0,
+          "duplicateQuestionNumbers": 0,
+          "duplicateNumbersList": [],
+          "unassignedModules": 0,
+          "uncertainAnswers": 0,
+          "unreadableImages": 0,
+          "confidenceScore": 0.5,
+          "isVerificationReady": false
+        },
+        "metadata": {
+          "semester": 5,
+          "subjectName": "",
+          "subjectCode": "",
+          "totalMarks": null,
+          "duration": "",
+          "department": "CSE",
+          "totalModules": 0,
+          "totalQuestions": 0
+        },
+        "extractedImages": []
+      },
+      "validation": {
+        "isValid": false,
+        "summary": {
+          "totalItems": 0,
+          "validCount": 0,
+          "errorCount": 1,
+          "warningCount": 0,
+          "confidenceScore": 0
+        },
+        "errors": [
+          {
+            "id": "err_no_questions",
+            "code": "EMPTY_QUESTION_PAPER",
+            "message": "No questions could be extracted from this document."
+          }
+        ],
+        "warnings": [],
+        "info": []
+      },
+      "generatedBuffer": null,
+      "generatedFilename": null,
+      "recordId": "conv_1795404131370_229g0",
+      "updatedAt": "2026-11-23T03:22:12.524Z"
     }
   },
   "centralStudents": [],
   "auditLogs": [
+    {
+      "id": "log_1795379424018_t5w4",
+      "timestamp": "2026-11-22T20:30:24.018Z",
+      "user": "COE Administrator",
+      "role": "Department User",
+      "department": "CSE",
+      "action": "UNIVERSAL_DOCUMENT_CONVERTED",
+      "entityType": "QUESTION_PAPER",
+      "entityId": "conv_1795379422814_ooglw",
+      "details": {
+        "filename": "Drug Discovery MCQ Question Bank (2).pdf",
+        "format": "pdf",
+        "destinationTemplate": "QUESTION_PAPER",
+        "validationScore": 0
+      }
+    },
+    {
+      "id": "log_1795335445264_r54e",
+      "timestamp": "2026-11-22T08:17:25.264Z",
+      "user": "COE Administrator",
+      "role": "Department User",
+      "department": "CSE",
+      "action": "UNIVERSAL_DOCUMENT_CONVERTED",
+      "entityType": "QUESTION_PAPER",
+      "entityId": "conv_1795335444536_9pk8m",
+      "details": {
+        "filename": "demo question bank pdf (1).pdf",
+        "format": "pdf",
+        "destinationTemplate": "QUESTION_PAPER",
+        "validationScore": 1
+      }
+    },
     {
       "id": "log_1795335353699_a52p",
       "timestamp": "2026-11-22T08:15:53.699Z",

@@ -7,34 +7,35 @@ A comprehensive, offline-first examination management platform designed for auto
 
 ## 1. System Architecture
 
-The platform consists of five interconnected subsystems:
+The platform consists of six interconnected subsystems:
 
 ```
-+-----------------------------------------------------------------------------------+
-|                                 WEB PORTALS                                       |
-|                                                                                   |
-|   +-----------------------+   +-----------------------+   +-------------------+   |
-|   |   HOD / Faculty /     |   |     COE Portal        |   |   Student Exam    |   |
-|   |   Principal Portal    |   |  (React 19 + Vite)    |   |      Portal       |   |
-|   |  (React 19 + Express) |   |      Port 3001        |   | (React 19 + Vite) |   |
-|   |      Port 3000        |   |                       |   |     Port 3002     |   |
-|   +-----------+-----------+   +-----------+-----------+   +---------+---------+   |
-+---------------|---------------------------|-------------------------|-------------+
-                |                           |                         |
-                | REST / SSE (Port 8081)    | REST / SSE              | Offline HTTP
-                |                           |                         | (Port 8082)
-+---------------v---------------------------v-----------+   +---------v-------------+
-|               CENTRAL JAVA BACKEND                    |   |  ISOLATED LAB SERVER  |
-|                 (CampusExam.java)                     |   |   (LabServer.java)    |
-|                     Port 8081                         |   |       Port 8082       |
-|                                                       |   |                       |
-|   - Academic Roster & Course Outcome Engine           |   | - Authoritative Exam  |
-|   - Question Bank & 4-Set Shuffle Generator           |   |   Runtime Engine      |
-|   - Cryptographic Package Provisioning                |   | - Multi-Department    |
-|   - Result Import, RSA Verification, COE Approval     |   |   Shared Lab Cohorts  |
-|   - Real-time SSE State Broadcast                     |   | - Attempt-Scoped Lock |
-|   - Keys: central_private.key, lab_public.key         |   | - Signed .labresult   |
-|                                                       |   | - Keys: lab_private   |
++---------------------------------------------------------------------------------------------------+
+|                                             WEB PORTALS                                           |
+|                                                                                                   |
+|   +-----------------------+   +-------------------+   +---------------+   +-------------------+   |
+|   |   HOD / Faculty /     |   |    COE Portal     |   | Student Exam  |   |     Document      |   |
+|   |   Principal Portal    |   | (React 19 + Vite) |   |    Portal     |   |  Converter Server |   |
+|   |  (React 19 + Express) |   |     Port 3001     |   | (React + Vite)|   |  (Express + OCR)  |   |
+|   |      Port 3000        |   |                   |   |   Port 3002   |   |     Port 5001     |   |
+|   +-----------+-----------+   +---------+---------+   +-------+-------+   +---------+---------+   |
++---------------|-------------------------|---------------------|---------------------|-------------+
+                |                         |                     |                     |
+                | REST / SSE (Port 8081)  | REST / SSE          | Offline HTTP        | Multi-format
+                |                         |                     | (Port 8082)         | Word/PDF/OCR
++---------------v-------------------------v-------------+   +---v-------------------+ |
+|               CENTRAL JAVA BACKEND                    |   |  ISOLATED LAB SERVER  | |
+|                 (CampusExam.java)                     |   |   (LabServer.java)    | |
+|                     Port 8081                         |   |       Port 8082       | |
+|                                                       |   |                       | |
+|   - Academic Roster & Course Outcome Engine           |   | - Authoritative Exam  | |
+|   - Question Bank & 4-Set Shuffle Generator           |   |   Runtime Engine      | |
+|   - Cryptographic Package Provisioning                |   | - Multi-Department    | |
+|   - Result Import, RSA Verification, COE Approval     |   |   Shared Lab Cohorts  | |
+|   - Multi-Format Question Archive (.xlsx/.docx/PDF)   |   | - Attempt-Scoped Lock | |
+|   - Real-time SSE State Broadcast                     |   | - Signed .labresult   | |
+|   - Keys: central_private.key, lab_public.key         |   | - Keys: lab_private   | |
+|                                                       |<--+-----------------------+-+
 +---------------------------+---------------------------+   +-----------------------+
                             | JDBC
 +---------------------------v---------------------------+
@@ -67,8 +68,8 @@ Open PowerShell as Administrator (or standard user) and run:
 
 ```powershell
 # 1. Clone repository
-git clone https://github.com/DHANUSHKN0007/sucess1.git
-cd sucess1
+git clone https://github.com/DHANUSHKN0007/sucess2.git
+cd sucess2
 
 # 2. Run automated setup (installs npm packages, compiles Java, creates keypairs)
 .\setup.ps1
@@ -125,6 +126,7 @@ chmod +x setup.sh start-all.sh stop-all.sh status.sh
 | **COE** | `http://localhost:3001` | COE | `coe` | `COE@5828` *(or `Admin@123`)* |
 | **Student (CSE)** | `http://localhost:3002` | STUDENT | USN: `4MH27CS001` | DOB: `2004-01-01` |
 | **Student (ISE)** | `http://localhost:3002` | STUDENT | USN: `4MH24IS001` | DOB: `2004-02-01` |
+| **Doc Converter API** | `http://localhost:5001` | SERVICE | - | - |
 
 *Note: In LAN mode, replace `localhost` with the host computer's LAN IP address (e.g. `http://192.168.1.50:3000`). The frontends automatically resolve backend API addresses relative to the current browser hostname.*
 

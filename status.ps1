@@ -17,7 +17,8 @@ $services = @(
     @{ Name = "Independent Lab Server"; Port = 8082; CheckUrl = "http://127.0.0.1:8082/health" },
     @{ Name = "HOD / Faculty Portal"; Port = 3000; CheckUrl = "http://127.0.0.1:3000" },
     @{ Name = "COE Examination Portal"; Port = 3001; CheckUrl = "http://127.0.0.1:3001" },
-    @{ Name = "Student Examination Portal"; Port = 3002; CheckUrl = "http://127.0.0.1:3002" }
+    @{ Name = "Student Examination Portal"; Port = 3002; CheckUrl = "http://127.0.0.1:3002" },
+    @{ Name = "Document Converter API"; Port = 5001; CheckUrl = "http://127.0.0.1:5001/api/health" }
 )
 
 foreach ($s in $services) {

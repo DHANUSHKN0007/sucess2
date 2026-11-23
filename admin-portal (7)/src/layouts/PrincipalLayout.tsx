@@ -6,16 +6,20 @@ import {
   ClipboardList,
   FileBarChart2,
   LayoutDashboard,
+  LogOut,
   Menu,
+  Settings,
   ShieldCheck,
   UserCheck,
   X,
 } from 'lucide-react';
 import { InstitutionLogo } from '../components/InstitutionLogo';
 import { AccountMenu } from '../components/AccountMenu';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { realtimeService } from '../services/realtimeService';
 import { getAuthToken } from '../services/apiClient';
+import { useAuth } from '../hooks/useAuth';
 
 const PRINCIPAL_NAV_ITEMS = [
   { label: 'Dashboard', to: '/admin/principal/dashboard', icon: LayoutDashboard },
@@ -26,12 +30,15 @@ const PRINCIPAL_NAV_ITEMS = [
     icon: FileBarChart2,
   },
   { label: 'Audit Logs', to: '/admin/principal/audit-logs', icon: ClipboardList },
+  { label: 'Settings', to: '/admin/principal/profile-settings', icon: Settings },
 ];
 
 export const PrincipalLayout: React.FC = () => {
   const location = useLocation();
+  const { user, logout } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [confirmLogoutOpen, setConfirmLogoutOpen] = useState(false);
 
   useEffect(() => {
     const token = getAuthToken() || undefined;
@@ -42,9 +49,9 @@ export const PrincipalLayout: React.FC = () => {
   const isNavActive = (to: string) => location.pathname === to;
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row bg-[#F5F7FB] dark:bg-slate-950 text-[#1F2937] dark:text-slate-100 transition-colors">
+    <div className="h-screen overflow-hidden flex flex-col lg:flex-row bg-[#F5F7FB] dark:bg-slate-950 text-[#1F2937] dark:text-slate-100 transition-colors">
       {/* Mobile Header Bar */}
-      <header className="lg:hidden sticky top-0 z-40 flex items-center justify-between px-4 py-3 bg-[#17243A] text-white border-b border-slate-800">
+      <header className="lg:hidden shrink-0 sticky top-0 z-40 flex items-center justify-between px-4 py-3 bg-[#17243A] text-white border-b border-slate-800">
         <InstitutionLogo variant="mobile-bar" subtitle="Principal Portal" />
         <div className="flex items-center gap-2">
           <AccountMenu profileSettingsPath="/admin/principal/profile-settings" />
@@ -94,6 +101,17 @@ export const PrincipalLayout: React.FC = () => {
                   </Link>
                 );
               })}
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  setConfirmLogoutOpen(true);
+                }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer"
+              >
+                <LogOut className="w-4 h-4 shrink-0" />
+                <span>Logout</span>
+              </button>
             </nav>
           </aside>
         </div>
@@ -101,7 +119,7 @@ export const PrincipalLayout: React.FC = () => {
 
       {/* Desktop Sticky Sidebar */}
       <aside
-        className={`hidden lg:flex flex-col shrink-0 bg-[#17243A] text-white border-r border-slate-800 sticky top-0 h-screen transition-all duration-150 ${
+        className={`hidden lg:flex flex-col shrink-0 bg-[#17243A] text-white border-r border-slate-800 h-full transition-all duration-150 ${
           collapsed ? 'w-20' : 'w-68'
         }`}
       >
@@ -149,22 +167,33 @@ export const PrincipalLayout: React.FC = () => {
           })}
         </nav>
 
-        <div className="p-3.5 border-t border-white/10 bg-[#131E31]">
-          {!collapsed ? (
-            <div className="text-[11px] text-slate-400 leading-relaxed">
-              Maharaja Institute of Technology Mysore · Examination Management System
-            </div>
-          ) : (
-            <div className="flex justify-center">
-              <ShieldCheck className="w-4 h-4 text-slate-400" />
+        {/* Bottom Authenticated Principal Area & Logout */}
+        <div className="p-3.5 border-t border-white/10 bg-[#131E31] space-y-2">
+          {!collapsed && user && (
+            <div className="px-2 py-1">
+              <div className="text-xs font-semibold text-white truncate">{user.fullName}</div>
+              <div className="text-[11px] text-slate-400 truncate">
+                {user.designation || 'Principal & Professor'}
+              </div>
             </div>
           )}
+          <button
+            type="button"
+            onClick={() => setConfirmLogoutOpen(true)}
+            title={collapsed ? 'Logout' : undefined}
+            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-xs font-semibold text-red-400 hover:bg-red-500/15 hover:text-red-300 transition-colors cursor-pointer ${
+              collapsed ? 'justify-center' : ''
+            }`}
+          >
+            <LogOut className="w-4 h-4 shrink-0" />
+            {!collapsed && <span>Logout</span>}
+          </button>
         </div>
       </aside>
 
       {/* Main Content Wrapper */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="hidden lg:flex sticky top-0 z-30 bg-white dark:bg-slate-900 border-b border-[#D9E2EF] dark:border-slate-800 px-6 py-3 items-center justify-between gap-6">
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
+        <header className="hidden lg:flex shrink-0 bg-white dark:bg-slate-900 border-b border-[#D9E2EF] dark:border-slate-800 px-6 py-3 items-center justify-between gap-6">
           <div className="flex items-center gap-2.5 min-w-0">
             <ShieldCheck className="w-4 h-4 text-[#2563EB] dark:text-blue-400 shrink-0" />
             <span className="text-xs font-semibold text-[#17243A] dark:text-slate-100 whitespace-nowrap">
@@ -179,12 +208,27 @@ export const PrincipalLayout: React.FC = () => {
           <AccountMenu profileSettingsPath="/admin/principal/profile-settings" />
         </header>
 
-        <main className="flex-1 p-5 sm:p-6 lg:p-8 max-w-[1440px] w-full mx-auto">
-          <ErrorBoundary>
-            <Outlet />
-          </ErrorBoundary>
+        <main className="flex-1 overflow-y-auto p-5 sm:p-6 lg:p-8 w-full">
+          <div className="max-w-[1440px] mx-auto w-full">
+            <ErrorBoundary>
+              <Outlet />
+            </ErrorBoundary>
+          </div>
         </main>
       </div>
+
+      <ConfirmDialog
+        isOpen={confirmLogoutOpen}
+        title="Sign Out Confirmation"
+        description="Are you sure you want to sign out of the Principal Administrative Portal? Your active session will be securely terminated."
+        confirmLabel="Sign Out"
+        variant="destructive"
+        onConfirm={async () => {
+          setConfirmLogoutOpen(false);
+          await logout();
+        }}
+        onCancel={() => setConfirmLogoutOpen(false)}
+      />
     </div>
   );
 };

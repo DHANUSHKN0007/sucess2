@@ -5,7 +5,15 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const QUESTION_TEMPLATE_PATH = path.resolve(__dirname, '../../../../client/public/templates/q_template.xlsx');
+const candidateTemplatePaths = [
+  path.resolve(__dirname, '../../../../public/templates/q_template.xlsx'),
+  path.resolve(__dirname, '../../../public/templates/q_template.xlsx'),
+  path.resolve(__dirname, '../../../../dist/templates/q_template.xlsx'),
+  path.resolve(process.cwd(), 'admin-portal (7)/public/templates/q_template.xlsx'),
+  path.resolve(process.cwd(), 'public/templates/q_template.xlsx'),
+  path.resolve(__dirname, '../../../../client/public/templates/q_template.xlsx')
+];
+const QUESTION_TEMPLATE_PATH = candidateTemplatePaths.find(p => fs.existsSync(p)) || candidateTemplatePaths[0];
 const IMAGE_DIR = path.resolve(__dirname, '../../../uploads/images');
 
 function loadImageSource(source) {

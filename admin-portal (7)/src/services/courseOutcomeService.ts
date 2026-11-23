@@ -3,7 +3,7 @@ import { apiDownloadBlob, apiRequest, ApiClientError } from './apiClient';
 import { triggerBlobDownload } from '../utils/exportUtils';
 import { AuthUser, CourseOutcomeDocumentRevision, Subject } from '../types';
 
-const MAX_COURSE_OUTCOMES_PDF_BYTES = 25 * 1024 * 1024;
+export const MAX_COURSE_OUTCOMES_PDF_BYTES = 50 * 1024 * 1024;
 
 function buildHodContextHeaders(actor: AuthUser): Record<string, string> {
   if (!actor.id || !actor.departmentId || !actor.departmentCode) {
@@ -37,7 +37,7 @@ export async function validateCourseOutcomePdfFile(file: File): Promise<string |
     return 'The selected PDF file is empty (0 bytes).';
   }
   if (file.size > MAX_COURSE_OUTCOMES_PDF_BYTES) {
-    return 'Course Outcomes PDF exceeds the 25 MB upload limit.';
+    return 'Course Outcomes PDF exceeds the 50 MB upload limit.';
   }
 
   try {

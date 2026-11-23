@@ -138,6 +138,15 @@ export const COEPortalLayout: React.FC = () => {
   const [confirmLogoutOpen, setConfirmLogoutOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
 
+  // Editable Account Information state
+  const [profileFullName, setProfileFullName] = useState('');
+  const [profileEmail, setProfileEmail] = useState('');
+  const [profileCurrentPassword, setProfileCurrentPassword] = useState('');
+  const [profileNewPassword, setProfileNewPassword] = useState('');
+  const [profileConfirmPassword, setProfileConfirmPassword] = useState('');
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileFeedback, setProfileFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
   React.useEffect(() => {
     const handleResize = () => {
       if (window.innerWidth < 1280) {
@@ -174,6 +183,43 @@ export const COEPortalLayout: React.FC = () => {
   if (!authSession || !authSession.authenticated) {
     return <Navigate to="/login" replace />;
   }
+
+  const coeDesignation =
+    !authSession.user.designation ||
+    authSession.user.designation.toLowerCase().includes('head of department') ||
+    authSession.user.designation.toLowerCase().includes('hod')
+      ? 'Controller of Examinations'
+      : authSession.user.designation;
+
+  React.useEffect(() => {
+    if (authSession?.user) {
+      setProfileFullName(authSession.user.fullName || '');
+      setProfileEmail(authSession.user.email || '');
+    }
+  }, [authSession?.user, accountModalOpen]);
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setProfileFeedback(null);
+    setProfileSaving(true);
+    try {
+      if (profileFullName.trim() !== authSession.user.fullName || profileEmail.trim() !== authSession.user.email) {
+        const updated = await authenticationService.updateProfile(profileFullName.trim(), profileEmail.trim());
+        setAuthSession({ ...authSession, user: { ...authSession.user, ...updated } });
+      }
+      if (profileNewPassword) {
+        await authenticationService.changePassword(profileCurrentPassword, profileNewPassword, profileConfirmPassword);
+        setProfileCurrentPassword('');
+        setProfileNewPassword('');
+        setProfileConfirmPassword('');
+      }
+      setProfileFeedback({ type: 'success', message: 'Account information updated successfully.' });
+    } catch (err) {
+      setProfileFeedback({ type: 'error', message: err instanceof Error ? err.message : 'Failed to update profile.' });
+    } finally {
+      setProfileSaving(false);
+    }
+  };
 
   const currentMeta = ROUTE_TITLES[location.pathname] || {
     section: 'COE Portal',
@@ -458,18 +504,18 @@ export const COEPortalLayout: React.FC = () => {
                 {authSession.user.fullName}
               </div>
               <div className="text-xs text-slate-300 truncate mt-0.5">
-                {authSession.user.designation} · {authSession.user.username}
+                {coeDesignation} · {authSession.user.username}
               </div>
             </button>
           )}
 
-          <div className="flex items-center gap-1.5">
+          <div className={`flex ${isCompact ? 'flex-col items-center' : 'items-center'} gap-1.5`}>
             <button
               type="button"
               onClick={() => setConfirmLogoutOpen(true)}
               title="Sign out of COE Portal"
-              className={`flex-1 flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-semibold text-red-300 hover:bg-[#B42318] hover:text-white transition-colors whitespace-nowrap cursor-pointer ${
-                isCompact ? 'justify-center' : ''
+              className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-semibold text-red-300 hover:bg-[#B42318] hover:text-white transition-colors whitespace-nowrap cursor-pointer ${
+                isCompact ? 'w-full justify-center px-0' : 'flex-1'
               }`}
             >
               <LogOut className="w-4 h-4 shrink-0" aria-hidden="true" />
@@ -482,7 +528,9 @@ export const COEPortalLayout: React.FC = () => {
                 onClick={() => setCollapsed((prev) => !prev)}
                 aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
                 title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-                className="p-2.5 rounded-lg text-slate-300 hover:bg-white/10 hover:text-white transition-colors shrink-0 cursor-pointer"
+                className={`p-2.5 rounded-lg text-slate-300 hover:bg-white/10 hover:text-white transition-colors shrink-0 cursor-pointer ${
+                  isCompact ? 'w-full flex items-center justify-center' : ''
+                }`}
               >
                 {collapsed ? (
                   <ChevronRight className="w-4 h-4" />
@@ -498,9 +546,9 @@ export const COEPortalLayout: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row bg-[#F5F7FB] dark:bg-slate-950 text-[#1F2937] dark:text-slate-100">
+    <div className="h-screen overflow-hidden flex flex-col lg:flex-row bg-[#F5F7FB] dark:bg-slate-950 text-[#1F2937] dark:text-slate-100">
       {/* Mobile Top App Bar */}
-      <header className="lg:hidden sticky top-0 z-30 flex items-center justify-between px-4 py-3 bg-[#17243A] text-white border-b border-white/10">
+      <header className="lg:hidden shrink-0 sticky top-0 z-30 flex items-center justify-between px-4 py-3 bg-[#17243A] text-white border-b border-white/10">
         <OfficialLogo variant="mobile-bar" />
         <button
           type="button"
@@ -528,7 +576,7 @@ export const COEPortalLayout: React.FC = () => {
 
       {/* AREA 1: Desktop Primary Sidebar */}
       <aside
-        className={`hidden lg:block sticky top-0 h-screen shrink-0 transition-[width] duration-150 ${
+        className={`hidden lg:block h-full shrink-0 transition-[width] duration-150 ${
           collapsed ? 'w-[72px]' : 'w-[248px]'
         }`}
       >
@@ -539,7 +587,7 @@ export const COEPortalLayout: React.FC = () => {
       {secondaryNav && (
         <aside
           aria-label="Contextual Page Sections"
-          className="hidden lg:flex flex-col sticky top-0 h-screen w-[276px] shrink-0 bg-white dark:bg-slate-900 border-r border-[#D9E2EF] dark:border-slate-800 select-none"
+          className="hidden lg:flex flex-col h-full w-[276px] shrink-0 bg-white dark:bg-slate-900 border-r border-[#D9E2EF] dark:border-slate-800 select-none"
         >
           {/* Secondary Panel Title */}
           <div className="px-5 py-5 border-b border-[#D9E2EF] dark:border-slate-800">
@@ -691,9 +739,9 @@ export const COEPortalLayout: React.FC = () => {
       )}
 
       {/* AREA 3: Main Working Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
         {/* Top Bar with Breadcrumb & Authenticated Account Dropdown */}
-        <header className="sticky top-0 z-20 bg-white dark:bg-slate-900 border-b border-[#D9E2EF] dark:border-slate-800 px-6 py-4 flex items-center justify-between gap-6">
+        <header className="shrink-0 z-20 bg-white dark:bg-slate-900 border-b border-[#D9E2EF] dark:border-slate-800 px-6 py-4 flex items-center justify-between gap-6">
           <div className="flex items-center gap-2.5 text-sm text-[#64748B] dark:text-slate-400 min-w-0 overflow-hidden">
             <span className="font-bold text-[#17243A] dark:text-slate-200 whitespace-nowrap">
               COE Portal
@@ -729,7 +777,7 @@ export const COEPortalLayout: React.FC = () => {
               <UserCircle className="w-4 h-4 text-[#2563EB] dark:text-blue-400 shrink-0" />
               <span className="hidden sm:inline">{authSession.user.fullName}</span>
               <span className="text-[#64748B] dark:text-slate-400 hidden md:inline">
-                ({authSession.user.designation})
+                ({coeDesignation})
               </span>
               <ChevronDown className="w-4 h-4 text-[#64748B] dark:text-slate-400" />
             </button>
@@ -747,7 +795,7 @@ export const COEPortalLayout: React.FC = () => {
                       {authSession.user.fullName}
                     </div>
                     <div className="text-[13px] text-[#64748B] dark:text-slate-400 mt-0.5">
-                      {authSession.user.designation}
+                      {coeDesignation}
                     </div>
                     <div className="font-mono text-xs text-[#2563EB] dark:text-blue-400 mt-1">
                       {authSession.user.username}
@@ -827,60 +875,65 @@ export const COEPortalLayout: React.FC = () => {
           </div>
         )}
 
-        {/* Main Working Area Content */}
-        <main className="flex-1 px-5 sm:px-7 lg:px-9 py-7 max-w-[1440px] w-full mx-auto space-y-6">
-          {error && (
-            <div
-              role="alert"
-              className="p-4 sm:p-5 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4"
-            >
-              <div className="flex items-start gap-3">
-                <ShieldAlert className="w-5 h-5 text-[#B42318] dark:text-red-400 shrink-0 mt-0.5" />
-                <div>
-                  <div className="text-sm font-bold text-[#B42318] dark:text-red-300">
-                    {errorKind === 'forbidden'
-                      ? 'Authorisation Failure (Access Denied)'
-                      : errorKind === 'unauthorised'
-                        ? 'Authentication Required'
-                        : errorKind === 'server' ||
-                            errorKind === 'validation' ||
-                            errorKind === 'not_found'
-                          ? 'Backend API Request Failed'
-                          : 'Backend Service Unavailable'}
+        {/* Scrollable Main Viewport */}
+        <div className="flex-1 overflow-y-auto flex flex-col">
+          {/* Main Working Area Content */}
+          <main className="flex-1 px-5 sm:px-7 lg:px-9 py-7 w-full">
+            <div className="max-w-[1440px] mx-auto space-y-6">
+              {error && (
+                <div
+                  role="alert"
+                  className="p-4 sm:p-5 rounded-xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4"
+                >
+                  <div className="flex items-start gap-3">
+                    <ShieldAlert className="w-5 h-5 text-[#B42318] dark:text-red-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-sm font-bold text-[#B42318] dark:text-red-300">
+                        {errorKind === 'forbidden'
+                          ? 'Authorisation Failure (Access Denied)'
+                          : errorKind === 'unauthorised'
+                            ? 'Authentication Required'
+                            : errorKind === 'server' ||
+                                errorKind === 'validation' ||
+                                errorKind === 'not_found'
+                              ? 'Backend API Request Failed'
+                              : 'Backend Service Unavailable'}
+                      </div>
+                      <div className="text-sm text-[#B42318] dark:text-red-300/90 mt-0.5 leading-relaxed">
+                        {error}
+                      </div>
+                    </div>
                   </div>
-                  <div className="text-sm text-[#B42318] dark:text-red-300/90 mt-0.5 leading-relaxed">
-                    {error}
-                  </div>
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => refreshAll()}
+                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#B42318] hover:bg-[#911B13] disabled:opacity-50 rounded-lg shrink-0 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                    {loading ? 'Retrying...' : 'Retry Connection'}
+                  </button>
                 </div>
-              </div>
-              <button
-                type="button"
-                disabled={loading}
-                onClick={() => refreshAll()}
-                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#B42318] hover:bg-[#911B13] disabled:opacity-50 rounded-lg shrink-0 cursor-pointer"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-                {loading ? 'Retrying...' : 'Retry Connection'}
-              </button>
-            </div>
-          )}
+              )}
 
-          {loading && examinations.length === 0 && !error ? (
-            <div className="bg-white dark:bg-[#1E293B] border border-[#D9E2EF] dark:border-[#334155] rounded-xl p-10 text-center text-sm text-[#64748B] dark:text-slate-400">
-              Loading examination records from backend services...
+              {loading && examinations.length === 0 && !error ? (
+                <div className="bg-white dark:bg-[#1E293B] border border-[#D9E2EF] dark:border-[#334155] rounded-xl p-10 text-center text-sm text-[#64748B] dark:text-slate-400">
+                  Loading examination records from backend services...
+                </div>
+              ) : (
+                <Outlet />
+              )}
             </div>
-          ) : (
-            <Outlet />
-          )}
-        </main>
+          </main>
 
-        {/* Footer (Corrected per Requirement 1: No "Offline" & No hardcoded year "2024") */}
-        <footer className="px-6 sm:px-8 py-4 border-t border-[#D9E2EF] dark:border-slate-800 bg-white dark:bg-slate-900 text-[13px] font-medium text-[#64748B] dark:text-slate-400 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div>
-            Maharaja Institute of Technology Mysore · Examination Management System (COE Portal)
-          </div>
-          <div>Maharaja Institute of Technology Mysore</div>
-        </footer>
+          {/* Footer */}
+          <footer className="shrink-0 px-6 sm:px-8 py-4 border-t border-[#D9E2EF] dark:border-slate-800 bg-white dark:bg-slate-900 text-[13px] font-medium text-[#64748B] dark:text-slate-400 flex flex-col sm:flex-row items-center justify-between gap-2">
+            <div>
+              Maharaja Institute of Technology Mysore · Examination Management System (COE Portal)
+            </div>
+            <div>Maharaja Institute of Technology Mysore</div>
+          </footer>
+        </div>
       </div>
 
       {/* My Account Information Dialog */}
@@ -891,14 +944,19 @@ export const COEPortalLayout: React.FC = () => {
           aria-modal="true"
           aria-labelledby="account-info-title"
         >
-          <div className="bg-white dark:bg-slate-900 border border-[#D9E2EF] dark:border-slate-800 rounded-xl max-w-md w-full p-6 sm:p-7 shadow-lg">
+          <div className="bg-white dark:bg-slate-900 border border-[#D9E2EF] dark:border-slate-800 rounded-xl max-w-lg w-full p-6 sm:p-7 shadow-xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-[#D9E2EF] dark:border-slate-800 pb-3.5">
-              <h3
-                id="account-info-title"
-                className="text-lg font-bold text-[#17243A] dark:text-white"
-              >
-                COE Account Information
-              </h3>
+              <div>
+                <h3
+                  id="account-info-title"
+                  className="text-lg font-bold text-[#17243A] dark:text-white"
+                >
+                  COE Account Information
+                </h3>
+                <p className="text-xs text-[#64748B] dark:text-slate-400 mt-0.5">
+                  View and update your display identity and security credentials
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => setAccountModalOpen(false)}
@@ -908,58 +966,125 @@ export const COEPortalLayout: React.FC = () => {
               </button>
             </div>
 
-            <dl className="mt-5 space-y-3.5 text-sm">
-              <div className="flex justify-between py-2 border-b border-[#D9E2EF] dark:border-slate-800">
-                <dt className="text-[#64748B] dark:text-slate-400">COE Identity:</dt>
-                <dd className="font-bold text-[#1F2937] dark:text-slate-100">
-                  {authSession.user.fullName}
-                </dd>
+            {profileFeedback && (
+              <div
+                className={`mt-4 p-3 rounded-lg text-xs font-semibold ${
+                  profileFeedback.type === 'success'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                    : 'bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 text-red-800 dark:text-red-200'
+                }`}
+              >
+                {profileFeedback.message}
               </div>
-              <div className="flex justify-between py-2 border-b border-[#D9E2EF] dark:border-slate-800">
-                <dt className="text-[#64748B] dark:text-slate-400">Username:</dt>
-                <dd className="font-mono font-semibold text-[#2563EB] dark:text-blue-400">
-                  {authSession.user.username}
-                </dd>
-              </div>
-              <div className="flex justify-between py-2 border-b border-[#D9E2EF] dark:border-slate-800">
-                <dt className="text-[#64748B] dark:text-slate-400">Designation:</dt>
-                <dd className="font-semibold text-[#1F2937] dark:text-slate-100">
-                  {authSession.user.designation}
-                </dd>
-              </div>
-              <div className="flex justify-between py-2 border-b border-[#D9E2EF] dark:border-slate-800">
-                <dt className="text-[#64748B] dark:text-slate-400">Employee ID:</dt>
-                <dd className="font-mono text-[#1F2937] dark:text-slate-200">
-                  {authSession.user.employeeId}
-                </dd>
-              </div>
-              <div className="flex justify-between py-2">
-                <dt className="text-[#64748B] dark:text-slate-400">Session Authenticated:</dt>
-                <dd className="font-mono text-[#64748B] dark:text-slate-400 tabular-nums">
-                  {authSession.issuedAt}
-                </dd>
-              </div>
-            </dl>
+            )}
 
-            <div className="mt-6 flex items-center justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setAccountModalOpen(false);
-                  navigate('/settings');
-                }}
-                className="px-4 py-2.5 text-sm font-semibold text-[#1F2937] dark:text-slate-200 border border-[#D9E2EF] dark:border-slate-700 rounded-lg hover:bg-[#F5F7FB] dark:hover:bg-slate-800 cursor-pointer"
-              >
-                Change Password / Theme
-              </button>
-              <button
-                type="button"
-                onClick={() => setAccountModalOpen(false)}
-                className="px-5 py-2.5 text-sm font-semibold text-white bg-[#2563EB] hover:bg-[#1D4ED8] rounded-lg cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
+            <form onSubmit={handleSaveProfile} className="mt-5 space-y-4 text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label className="block text-xs font-semibold text-[#64748B] dark:text-slate-400 mb-1">
+                    Username
+                  </label>
+                  <div className="px-3 py-2 text-xs font-mono font-bold bg-[#F5F7FB] dark:bg-slate-800 border border-[#D9E2EF] dark:border-slate-700 rounded-lg text-[#2563EB] dark:text-blue-400">
+                    {authSession.user.username}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#64748B] dark:text-slate-400 mb-1">
+                    Designation
+                  </label>
+                  <div className="px-3 py-2 text-xs font-semibold bg-[#F5F7FB] dark:bg-slate-800 border border-[#D9E2EF] dark:border-slate-700 rounded-lg text-[#1F2937] dark:text-slate-200">
+                    {coeDesignation}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#64748B] dark:text-slate-400 mb-1">
+                  Full Name / Display Name
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={profileFullName}
+                  onChange={(e) => setProfileFullName(e.target.value)}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#1F2937] dark:text-slate-100 focus:outline-none focus:border-[#2563EB]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-[#64748B] dark:text-slate-400 mb-1">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={profileEmail}
+                  onChange={(e) => setProfileEmail(e.target.value)}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#1F2937] dark:text-slate-100 focus:outline-none focus:border-[#2563EB]"
+                />
+              </div>
+
+              <div className="pt-3 border-t border-[#D9E2EF] dark:border-slate-800 space-y-3">
+                <div className="text-xs font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400">
+                  Change Password (Leave blank to keep current)
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-[#64748B] dark:text-slate-400 mb-1">
+                    Current Password
+                  </label>
+                  <input
+                    type="password"
+                    value={profileCurrentPassword}
+                    onChange={(e) => setProfileCurrentPassword(e.target.value)}
+                    placeholder="Enter current password to change"
+                    className="w-full px-3 py-2 text-xs rounded-lg border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#1F2937] dark:text-slate-100 focus:outline-none focus:border-[#2563EB]"
+                  />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-[#64748B] dark:text-slate-400 mb-1">
+                      New Password
+                    </label>
+                    <input
+                      type="password"
+                      value={profileNewPassword}
+                      onChange={(e) => setProfileNewPassword(e.target.value)}
+                      placeholder="Min 8 chars, letter + digit"
+                      className="w-full px-3 py-2 text-xs rounded-lg border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#1F2937] dark:text-slate-100 focus:outline-none focus:border-[#2563EB]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-[#64748B] dark:text-slate-400 mb-1">
+                      Confirm New Password
+                    </label>
+                    <input
+                      type="password"
+                      value={profileConfirmPassword}
+                      onChange={(e) => setProfileConfirmPassword(e.target.value)}
+                      placeholder="Confirm new password"
+                      className="w-full px-3 py-2 text-xs rounded-lg border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#1F2937] dark:text-slate-100 focus:outline-none focus:border-[#2563EB]"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-6 pt-3 border-t border-[#D9E2EF] dark:border-slate-800 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setAccountModalOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold text-[#64748B] hover:text-[#1F2937] dark:text-slate-400 dark:hover:text-white rounded-lg border border-[#D9E2EF] dark:border-slate-700 cursor-pointer"
+                >
+                  Close
+                </button>
+                <button
+                  type="submit"
+                  disabled={profileSaving}
+                  className="px-5 py-2 text-xs font-bold text-white bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 rounded-lg cursor-pointer transition-colors shadow-xs"
+                >
+                  {profileSaving ? 'Saving Changes...' : 'Save Profile Changes'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

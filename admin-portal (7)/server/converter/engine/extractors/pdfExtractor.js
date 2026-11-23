@@ -19,13 +19,19 @@ if (!fs.existsSync(IMAGES_DIR)) {
 }
 
 function hasUnusableTextLayer(text) {
+  if (!text || text.trim().length < 80) return true;
   const tokens = text.match(/[A-Za-z0-9]+/g) || [];
-  if (text.trim().length < 80 || tokens.length < 20) return true;
+  if (tokens.length < 20) return true;
 
-  // If there are plenty of multi-letter normal words, the text was extracted cleanly and is readable
+  // Check for high density of replacement/box/arrow characters (garbled custom font)
+  const symbolMatches = text.match(/[■●□•←○▼→◆▲★\uFFFD\u25A0-\u25FF\u2190-\u21FF]/g) || [];
+  if (symbolMatches.length > 15 && (symbolMatches.length / text.length) > 0.01) {
+    return true;
+  }
+
   const normalWords = tokens.filter(token => token.length >= 3);
-  if (normalWords.length >= 10) {
-    return false;
+  if (normalWords.length < 10) {
+    return true;
   }
 
   const singleLetterTokens = tokens.filter(token => token.length === 1);
@@ -37,9 +43,38 @@ function hasUnusableTextLayer(text) {
   }
   const dominantGlyphRatio = Math.max(0, ...frequencies.values()) / tokens.length;
 
-  // Type3 font encodings can produce long, non-empty text streams made mostly
-  // of repeated one-character glyphs. Length alone incorrectly treats these as readable.
   return singleLetterRatio > 0.7 && dominantGlyphRatio > 0.3;
+}
+
+async function extractTextUsingPdfjs(buffer) {
+  try {
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    let fullText = '';
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      let lastY = null;
+      let pageLines = [];
+      let curLine = [];
+      for (const item of content.items) {
+        const y = item.transform ? Math.round(item.transform[5] * 10) / 10 : 0;
+        if (lastY === null || Math.abs(y - lastY) < 3) {
+          curLine.push(item.str);
+        } else {
+          if (curLine.length > 0) pageLines.push(curLine.join(' '));
+          curLine = [item.str];
+        }
+        lastY = y;
+      }
+      if (curLine.length > 0) pageLines.push(curLine.join(' '));
+      fullText += pageLines.join('\n') + '\n';
+    }
+    return { text: fullText.trim(), numPages: doc.numPages };
+  } catch (err) {
+    console.warn('[PDF Extractor] pdfjs extraction error:', err.message);
+    return null;
+  }
 }
 
 function crc32(buffer) {
@@ -302,11 +337,24 @@ async function extractEmbeddedImagesFromPdf(buffer, prefix = 'pdf_img') {
   return { images, pageSizes };
 }
 
-export function extractFromPdf(filePath) {
+export async function extractFromPdf(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  const { images: extractedImages, pageSizes } = await extractEmbeddedImagesFromPdf(buffer, path.basename(filePath, path.extname(filePath))).catch(() => ({ images: [], pageSizes: [] }));
+
+  // Primary: High-fidelity text extraction via Mozilla pdfjs-dist
+  const pdfjsResult = await extractTextUsingPdfjs(buffer);
+  if (pdfjsResult && pdfjsResult.text && !hasUnusableTextLayer(pdfjsResult.text)) {
+    return {
+      text: pdfjsResult.text,
+      numPages: pdfjsResult.numPages,
+      images: extractedImages,
+      isScannedLikely: false
+    };
+  }
+
+  // Secondary fallback: pdf2json parser
   return new Promise((resolve) => {
-    const buffer = fs.readFileSync(filePath);
-    extractEmbeddedImagesFromPdf(buffer, path.basename(filePath, path.extname(filePath))).then(({ images: extractedImages, pageSizes }) => {
-      // Suppress harmless internal Type3 font decoding console messages
+    // Suppress harmless internal Type3 font decoding console messages
       const originalLog = console.log;
       const originalWarn = console.warn;
       const filterType3 = (args) => {
@@ -423,9 +471,5 @@ export function extractFromPdf(filePath) {
 
       // Pass verbosity 0 (ERRORS only) to suppress non-fatal font decoding messages
       pdfParser.loadPDF(filePath, 0);
-    }).catch((err) => {
-      console.warn('[PDF Extractor] Could not inspect PDF image streams:', err.message);
-      resolve({ text: '', numPages: 1, images: [], isScannedLikely: true });
-    });
   });
 }

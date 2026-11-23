@@ -33,6 +33,8 @@ export interface CreateHodDepartmentPayload {
   contactNumber: string;
   departmentName: string;
   departmentCode: string;
+  username?: string;
+  password?: string;
 }
 
 export interface UpdateHodPayload {
@@ -136,7 +138,7 @@ export const principalService = {
     payload: CreateHodDepartmentPayload,
     _actor: AuthUser
   ): Promise<{ department: Department; hodAccount: HodAccountRecord }> {
-    const cleanCode = payload.departmentCode.trim().toUpperCase();
+    const cleanCode = payload.departmentCode.trim();
     const cleanDeptName = payload.departmentName.trim();
     const cleanName = payload.fullName.trim();
     const cleanEmpId = payload.employeeId.trim().toUpperCase();
@@ -146,11 +148,17 @@ export const principalService = {
     if (!cleanCode || !cleanDeptName || !cleanName || !cleanEmpId || !cleanEmail || !cleanContact) {
       throw new ApiClientError('All HOD and Department fields are required.', 400, 'VALIDATION_ERROR');
     }
-    if (!/^[A-Z]{2,8}$/.test(cleanCode)) {
-      throw new ApiClientError('Department Code must be 2–8 uppercase letters.', 400, 'VALIDATION_ERROR');
+    if (!/^[A-Za-z0-9_.-]{2,50}$/.test(cleanCode)) {
+      throw new ApiClientError('Department Code must be 2–50 alphanumeric characters.', 400, 'VALIDATION_ERROR');
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       throw new ApiClientError('Enter a valid official email address.', 400, 'VALIDATION_ERROR');
+    }
+
+    const username = payload.username?.trim();
+    const password = payload.password?.trim();
+    if (password && password.length < 8) {
+      throw new ApiClientError('Initial Password must be at least 8 characters.', 400, 'VALIDATION_ERROR');
     }
 
     const res = await apiRequest<{ department: Department; hodAccount: HodAccountRecord }>(
@@ -164,9 +172,49 @@ export const principalService = {
           contactNumber: cleanContact,
           departmentName: cleanDeptName,
           departmentCode: cleanCode,
+          username: username || undefined,
+          password: password || undefined,
         }),
       }
     );
+    return res.data;
+  },
+
+  async getDepartmentWorkspace(deptId: string | number, semester?: number): Promise<{
+    department: Department;
+    hod: HodAccountRecord | null;
+    selectedSemester: number;
+    subjects: any[];
+    students: any[];
+    studentCount: number;
+    performance: {
+      evaluatedCount: number;
+      absentCount: number;
+      passCount: number;
+      failCount: number;
+      passPercentage: number;
+    };
+    auditLogs: any[];
+  }> {
+    const url = semester && semester > 0
+      ? `${API_ENDPOINTS.principal.departmentWorkspace(deptId)}?semester=${semester}`
+      : API_ENDPOINTS.principal.departmentWorkspace(deptId);
+    const res = await apiRequest<{
+      department: Department;
+      hod: HodAccountRecord | null;
+      selectedSemester: number;
+      subjects: any[];
+      students: any[];
+      studentCount: number;
+      performance: {
+        evaluatedCount: number;
+        absentCount: number;
+        passCount: number;
+        failCount: number;
+        passPercentage: number;
+      };
+      auditLogs: any[];
+    }>(url);
     return res.data;
   },
 

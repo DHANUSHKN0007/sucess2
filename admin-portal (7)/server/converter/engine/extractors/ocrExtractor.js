@@ -57,16 +57,28 @@ export async function extractPdfWithOcr(pdfPath, numPages = 1, language = 'eng',
       ? [...targetPageSet].sort((a, b) => a - b)
       : Array.from({ length: Math.min(documentPages, 40) }, (_, index) => index + 1);
 
-    if (targetPageSet) {
-      for (const pageNumber of pageNumbersToRender) {
+    try {
+      if (targetPageSet) {
+        for (const pageNumber of pageNumbersToRender) {
+          execFileSync('pdftoppm', [
+            '-png', '-r', '200', '-f', String(pageNumber), '-l', String(pageNumber), pdfPath, prefix
+          ], { windowsHide: true, timeout: 120000, stdio: 'ignore' });
+        }
+      } else {
         execFileSync('pdftoppm', [
-          '-png', '-r', '200', '-f', String(pageNumber), '-l', String(pageNumber), pdfPath, prefix
+          '-png', '-r', '200', '-f', '1', '-l', String(pageNumbersToRender.length), pdfPath, prefix
         ], { windowsHide: true, timeout: 120000, stdio: 'ignore' });
       }
-    } else {
-      execFileSync('pdftoppm', [
-        '-png', '-r', '200', '-f', '1', '-l', String(pageNumbersToRender.length), pdfPath, prefix
-      ], { windowsHide: true, timeout: 120000, stdio: 'ignore' });
+    } catch (err) {
+      console.warn('[OCR Extractor] pdftoppm rendering unavailable or failed:', err.message);
+      return {
+        success: false,
+        text: '',
+        pagesProcessed: 0,
+        ocrEngines: ['offline_tesseract'],
+        scannedRatio: 1,
+        reason: 'pdftoppm_unavailable'
+      };
     }
 
     const renderedPageFiles = fs.readdirSync(tempDir)

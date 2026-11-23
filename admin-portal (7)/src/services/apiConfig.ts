@@ -39,6 +39,8 @@ export const API_ENDPOINTS = {
   },
   principal: {
     dashboardOverview: '/principal/dashboard',
+    departments: '/principal/departments',
+    departmentWorkspace: (deptId: string | number) => `/principal/departments/${deptId}/workspace`,
     hods: '/principal/hods',
     hodById: (id: string) => `/principal/hods/${id}`,
     replaceHod: (deptId: string) => `/principal/departments/${deptId}/replace-hod`,
@@ -48,6 +50,8 @@ export const API_ENDPOINTS = {
   },
   hod: {
     dashboardOverview: '/hod/dashboard',
+    promoteStudents: '/hod/student-lists/promote',
+    graduateStudents: '/hod/student-lists/graduate',
     departmentEnrollment: '/hod/enrollment/summary',
     academicContext: '/hod/academic-context',
     subjects: '/hod/subjects',

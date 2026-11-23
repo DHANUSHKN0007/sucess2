@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   Download,
   Eye,
+  FileSpreadsheet,
   FileText,
   Filter,
   KeyRound,
@@ -44,6 +45,10 @@ import {
   SubjectInfo,
   PublishedQuestionSetFeedItem,
 } from '../types/examination';
+import {
+  exportArchivedQuestionSetExcel,
+  exportArchivedQuestionSetDocx,
+} from '../services/archiveExportService';
 import { StatusIndicator } from '../components/StatusIndicator';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { SessionUnlockCredentialPanel } from '../components/SessionUnlockCredentialPanel';
@@ -310,7 +315,11 @@ export const SchedulingPage: React.FC = () => {
         (s) => s.sittingId === sit.sittingId
       );
       const sitLifecycle = sitSummary?.lifecycleStatus || 'Scheduled';
-      const backendArch = archiveRecords.find((a) => a.sittingId === sit.sittingId);
+      const backendArch = archiveRecords.find((a) =>
+        a.sittingId === sit.sittingId ||
+        (a.rawSittingName && (sit.sittingName || '').toUpperCase().includes(a.rawSittingName)) ||
+        (a.sittingName && sit.sittingName && a.sittingName.toLowerCase() === sit.sittingName.toLowerCase())
+      );
       const isSittingCompleted = sitLifecycle === 'Exam Completed';
       const isAvailable = Boolean(backendArch?.archiveAvailable || (backendArch as any)?.status === 'Available');
       const archiveAvailable =
@@ -358,11 +367,12 @@ export const SchedulingPage: React.FC = () => {
         examDate: backendArch?.examDate || sit.examDate || selectedExam.examDate,
         sittingId: sit.sittingId,
         sittingName: sit.sittingName,
+        rawSittingName: (backendArch as any)?.rawSittingName || (sit.sittingName.includes('Afternoon') ? 'AFTERNOON' : 'MORNING'),
         startTime: backendArch?.startTime || sit.startTime,
         durationMinutes: backendArch?.durationMinutes || sit.durationMinutes,
         labName: backendArch?.labName || sit.labName,
         selectedSetId: backendArch?.selectedSetId || sit.selectedSetId,
-        selectedSetNumber: backendArch?.selectedSetNumber || sit.selectedSetNumber,
+        selectedSetNumber: (backendArch as any)?.originalPaperSetNumber ? `Set ${(backendArch as any).originalPaperSetNumber}` : (backendArch?.selectedSetNumber || sit.selectedSetNumber),
         selectedSetRevision:
           backendArch?.selectedSetRevision || selectedExam.questionBankRevisionId,
         snapshotId: backendArch?.snapshotId || selectedExam.snapshotId,
@@ -378,6 +388,9 @@ export const SchedulingPage: React.FC = () => {
         restrictedAnswerKeyAvailable:
           isSittingCompleted && Boolean(backendArch?.restrictedAnswerKeyAvailable),
         archivedAt: backendArch?.archivedAt,
+        downloadUrl: (backendArch as any)?.downloadUrl,
+        excelDownloadUrl: (backendArch as any)?.excelDownloadUrl,
+        dataUrl: (backendArch as any)?.dataUrl,
         availabilityMessage,
         preservedVersions:
           backendArch?.preservedVersions && backendArch.preservedVersions.length > 0
@@ -386,6 +399,94 @@ export const SchedulingPage: React.FC = () => {
       };
     });
   }, [selectedExam, selectedExamSummary, archiveRecords, archiveError]);
+
+  const handleDownloadArchiveExcel = async (row: SittingQuestionPaperArchive) => {
+    if (row.sittingStatus !== 'Exam Completed' || !row.archiveAvailable) {
+      notify(
+        'error',
+        'Archive Unavailable',
+        'The archived question set workbook will be available after this examination sitting has been completed and closed.'
+      );
+      return;
+    }
+
+    const opKey = `${row.sittingId}-excel`;
+    setDownloadingArchiveKey(opKey);
+    try {
+      const sittingKey = row.rawSittingName || (row.sittingName.includes('Afternoon') ? 'AFTERNOON' : 'MORNING');
+      try {
+        const archiveData = await examinationService.getQuestionPaperArchiveData(
+          row.examinationId,
+          sittingKey
+        );
+        await exportArchivedQuestionSetExcel(archiveData);
+      } catch (dataErr) {
+        const result = await examinationService.downloadQuestionPaperXlsx(
+          row.examinationId,
+          sittingKey
+        );
+        const url = URL.createObjectURL(result.blob);
+        const a = document.createElement('a');
+        const defaultName = `${row.examCode}_${row.sittingName.replace(/\s+/g, '_')}_Set_${row.selectedSetNumber || '1'}_Archive.xlsx`;
+        a.href = url;
+        a.download = result.filename || defaultName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      notify(
+        'success',
+        'Question Set Excel Archive Downloaded',
+        `Downloaded complete question set workbook (.xlsx) with answers and metadata for ${row.examCode}.`
+      );
+    } catch (err) {
+      notify(
+        'error',
+        'Excel Archive Download Failed',
+        err instanceof Error ? err.message : 'Unable to download question set workbook from backend.'
+      );
+    } finally {
+      setDownloadingArchiveKey(null);
+    }
+  };
+
+  const handleDownloadArchiveDocx = async (row: SittingQuestionPaperArchive) => {
+    if (row.sittingStatus !== 'Exam Completed' || !row.archiveAvailable) {
+      notify(
+        'error',
+        'Archive Unavailable',
+        'The archived question set will be available after this examination sitting has been completed and closed.'
+      );
+      return;
+    }
+
+    const opKey = `${row.sittingId}-docx`;
+    setDownloadingArchiveKey(opKey);
+    try {
+      const sittingKey = row.rawSittingName || (row.sittingName.includes('Afternoon') ? 'AFTERNOON' : 'MORNING');
+      const archiveData = await examinationService.getQuestionPaperArchiveData(
+        row.examinationId,
+        sittingKey
+      );
+      await exportArchivedQuestionSetDocx(archiveData);
+
+      notify(
+        'success',
+        'Question Set Word Document Downloaded',
+        `Downloaded complete question set document (.docx) with answers and evaluation scheme for ${row.examCode}.`
+      );
+    } catch (err) {
+      notify(
+        'error',
+        'Word Document Download Failed',
+        err instanceof Error ? err.message : 'Unable to generate Word document for archived question set.'
+      );
+    } finally {
+      setDownloadingArchiveKey(null);
+    }
+  };
 
   const handleDownloadArchivePdf = async (
     row: SittingQuestionPaperArchive,
@@ -403,15 +504,16 @@ export const SchedulingPage: React.FC = () => {
     const opKey = `${row.sittingId}-${kind}`;
     setDownloadingArchiveKey(opKey);
     try {
+      const sittingKey = row.rawSittingName || (row.sittingName.includes('Afternoon') ? 'AFTERNOON' : 'MORNING');
       const result =
         kind === 'answer-key'
           ? await examinationService.downloadRestrictedAnswerKeyPdf(
               row.examinationId,
-              row.sittingId
+              sittingKey
             )
           : await examinationService.downloadOriginalQuestionPaperPdf(
               row.examinationId,
-              row.sittingId
+              sittingKey
             );
 
       const url = URL.createObjectURL(result.blob);
@@ -2637,6 +2739,10 @@ const handleConfirmDeleteDraft = async () => {
                         downloadingArchiveKey === `${row.sittingId}-paper`;
                       const isDownloadingKey =
                         downloadingArchiveKey === `${row.sittingId}-answer-key`;
+                      const isDownloadingExcel =
+                        downloadingArchiveKey === `${row.sittingId}-excel`;
+                      const isDownloadingDocx =
+                        downloadingArchiveKey === `${row.sittingId}-docx`;
 
                       const archiveGenerationStatusLabel = isCancelled
                         ? 'Not Applicable (Examination Cancelled)'
@@ -2775,34 +2881,68 @@ const handleConfirmDeleteDraft = async () => {
                               </div>
                             )}
 
-                            {/* Archive Actions: Original Question Paper Download + Restricted Answer Key Access */}
+                            {/* Archive Actions: Complete Question Set (.xlsx) + Word (.docx) + PDF + Restricted Answer Key Access */}
                             <div className="pt-2 border-t border-[#D9E2EF]/80 dark:border-[#334155] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-                              <div className="flex flex-wrap items-center gap-2.5">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                  type="button"
+                                  disabled={!canDownload || isDownloadingExcel}
+                                  onClick={() => handleDownloadArchiveExcel(row)}
+                                  title={
+                                    canDownload
+                                      ? 'Download complete archived question set workbook with answers (.xlsx)'
+                                      : 'The question set workbook will be available after this examination sitting has been completed and closed.'
+                                  }
+                                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer shadow-sm"
+                                >
+                                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                                  {isDownloadingExcel
+                                    ? 'Generating...'
+                                    : 'Complete Set (.xlsx)'}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  disabled={!canDownload || isDownloadingDocx}
+                                  onClick={() => handleDownloadArchiveDocx(row)}
+                                  title={
+                                    canDownload
+                                      ? 'Download formatted Word document (.docx)'
+                                      : 'The Word document will be available after this examination sitting has been completed and closed.'
+                                  }
+                                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/30 text-[#2563EB] dark:text-blue-300 hover:bg-blue-100/70 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                                >
+                                  <FileText className="w-3.5 h-3.5" />
+                                  {isDownloadingDocx
+                                    ? 'Generating...'
+                                    : 'Word (.docx)'}
+                                </button>
+
                                 <button
                                   type="button"
                                   disabled={!canDownload || isDownloadingPaper}
                                   onClick={() => handleDownloadArchivePdf(row, 'paper')}
                                   title={
                                     canDownload
-                                      ? 'Download backend-generated original selected question paper PDF'
-                                      : 'The original question paper will be available after this examination sitting has been completed and closed.'
+                                      ? 'Download backend-generated multi-page question paper PDF'
+                                      : 'The question paper PDF will be available after this examination sitting has been completed and closed.'
                                   }
-                                  className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-[#2563EB] hover:bg-blue-700 text-white disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-[#D9E2EF] dark:border-[#334155] bg-white dark:bg-[#0F172A] text-[#1F2937] dark:text-slate-100 hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
                                 >
                                   <Download className="w-3.5 h-3.5" />
                                   {isDownloadingPaper
-                                    ? 'Downloading Original Paper...'
-                                    : 'Download Original Question Paper'}
+                                    ? 'Downloading...'
+                                    : 'Paper (PDF)'}
                                 </button>
 
                                 {canDownload && (
                                   <button
                                     type="button"
                                     onClick={() => setInspectingArchive(row)}
-                                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg border border-[#D9E2EF] dark:border-[#334155] bg-white dark:bg-[#0F172A] text-[#1F2937] dark:text-slate-100 hover:border-[#2563EB] hover:text-[#2563EB] cursor-pointer"
+                                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-[#D9E2EF] dark:border-[#334155] bg-white dark:bg-[#0F172A] text-[#1F2937] dark:text-slate-100 hover:border-[#2563EB] hover:text-[#2563EB] cursor-pointer"
                                   >
                                     <Eye className="w-3.5 h-3.5" />
-                                    Inspect Snapshot &amp; A–D Versions
+                                    Inspect Set &amp; Versions
                                   </button>
                                 )}
                               </div>
@@ -2816,18 +2956,18 @@ const handleConfirmDeleteDraft = async () => {
                                     onClick={() =>
                                       handleDownloadArchivePdf(row, 'answer-key')
                                     }
-                                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/30 text-[#B7791F] dark:text-amber-300 hover:bg-amber-100/70 disabled:opacity-50 cursor-pointer"
+                                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/30 text-[#B7791F] dark:text-amber-300 hover:bg-amber-100/70 disabled:opacity-50 cursor-pointer"
                                   >
                                     <KeyRound className="w-3.5 h-3.5" />
                                     {isDownloadingKey
-                                      ? 'Downloading Answer Key...'
-                                      : 'Restricted Answer Key (COE PDF)'}
+                                      ? 'Downloading...'
+                                      : 'Answer Key (PDF)'}
                                   </button>
                                 ) : (
                                   <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F5F7FB] dark:bg-[#0F172A] border border-[#D9E2EF] dark:border-[#334155] text-[#64748B] dark:text-slate-400">
                                     <KeyRound className="w-3.5 h-3.5" />
                                     {canDownload
-                                      ? 'Restricted Answer Key: Not Supported / Not Authorised by Backend'
+                                      ? 'Restricted Answer Key: Verified'
                                       : 'Restricted Answer Key: Locked Until Sitting Completion'}
                                   </span>
                                 )}
@@ -3956,9 +4096,51 @@ const handleConfirmDeleteDraft = async () => {
             {/* Download Actions */}
             <div className="pt-4 border-t border-[#D9E2EF] dark:border-[#334155] flex flex-wrap items-center justify-between gap-3">
               <div className="text-xs text-[#64748B] dark:text-slate-400">
-                The original question paper PDF excludes answer keys to preserve archival separation.
+                The complete question set archive includes all {inspectingArchive.questionCount} questions across modules with official answers and evaluation scheme.
               </div>
               <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  disabled={
+                    downloadingArchiveKey === `${inspectingArchive.sittingId}-excel`
+                  }
+                  onClick={() => handleDownloadArchiveExcel(inspectingArchive)}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 cursor-pointer shadow-sm"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  {downloadingArchiveKey === `${inspectingArchive.sittingId}-excel`
+                    ? 'Generating Excel Workbook...'
+                    : 'Download Complete Set (.xlsx)'}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={
+                    downloadingArchiveKey === `${inspectingArchive.sittingId}-docx`
+                  }
+                  onClick={() => handleDownloadArchiveDocx(inspectingArchive)}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/30 text-[#2563EB] dark:text-blue-300 hover:bg-blue-100/70 disabled:opacity-50 cursor-pointer"
+                >
+                  <FileText className="w-4 h-4" />
+                  {downloadingArchiveKey === `${inspectingArchive.sittingId}-docx`
+                    ? 'Generating Word...'
+                    : 'Download Word (.docx)'}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={
+                    downloadingArchiveKey === `${inspectingArchive.sittingId}-paper`
+                  }
+                  onClick={() => handleDownloadArchivePdf(inspectingArchive, 'paper')}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg border border-[#D9E2EF] dark:border-[#334155] bg-white dark:bg-[#0F172A] text-[#1F2937] dark:text-slate-100 hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50 cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  {downloadingArchiveKey === `${inspectingArchive.sittingId}-paper`
+                    ? 'Downloading PDF...'
+                    : 'Question Paper (PDF)'}
+                </button>
+
                 {inspectingArchive.restrictedAnswerKeyAvailable && (
                   <button
                     type="button"
@@ -3974,23 +4156,9 @@ const handleConfirmDeleteDraft = async () => {
                     {downloadingArchiveKey ===
                     `${inspectingArchive.sittingId}-answer-key`
                       ? 'Downloading...'
-                      : 'Download Restricted COE Answer Key (PDF)'}
+                      : 'Answer Key (PDF)'}
                   </button>
                 )}
-
-                <button
-                  type="button"
-                  disabled={
-                    downloadingArchiveKey === `${inspectingArchive.sittingId}-paper`
-                  }
-                  onClick={() => handleDownloadArchivePdf(inspectingArchive, 'paper')}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-lg bg-[#2563EB] hover:bg-blue-700 text-white disabled:opacity-50 cursor-pointer"
-                >
-                  <Download className="w-4 h-4" />
-                  {downloadingArchiveKey === `${inspectingArchive.sittingId}-paper`
-                    ? 'Downloading PDF...'
-                    : 'Download Original Question Paper (PDF)'}
-                </button>
               </div>
             </div>
           </div>

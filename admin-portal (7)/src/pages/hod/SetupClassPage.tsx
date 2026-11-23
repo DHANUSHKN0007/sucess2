@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import {
   AlertCircle,
   Archive,
+  ArrowUpRight,
   BookOpen,
   CheckCircle2,
   Download,
@@ -10,6 +11,7 @@ import {
   Eye,
   FileSpreadsheet,
   FileUp,
+  GraduationCap,
   History,
   Lock,
   Plus,
@@ -78,6 +80,16 @@ export const SetupClassPage: React.FC = () => {
   const [deletingSection, setDeletingSection] = useState(false);
   const [deleteSectionError, setDeleteSectionError] = useState<string | null>(null);
   const [confirmWithStudents, setConfirmWithStudents] = useState(false);
+
+  // Student Semester Promotion / Graduation state
+  const [promoteModalOpen, setPromoteModalOpen] = useState(false);
+  const [targetPromoteSection, setTargetPromoteSection] = useState('');
+  const [promoting, setPromoting] = useState(false);
+  const [promoteError, setPromoteError] = useState('');
+
+  const [graduateModalOpen, setGraduateModalOpen] = useState(false);
+  const [graduating, setGraduating] = useState(false);
+  const [graduateError, setGraduateError] = useState('');
 
   // Subject CRUD state
   const [subjectModalOpen, setSubjectModalOpen] = useState(false);
@@ -798,6 +810,54 @@ export const SetupClassPage: React.FC = () => {
     }
   };
 
+  const handlePromoteSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedSection) return;
+    setPromoteError('');
+    setPromoting(true);
+    try {
+      const res = await studentService.promoteStudentsSemester({
+        sourceSemester: selectedSemester,
+        sourceSection: selectedSection,
+        targetSemester: selectedSemester + 1,
+        targetSection: targetPromoteSection.trim() || selectedSection,
+      });
+      setFeedback({
+        type: 'success',
+        text: res.message || `Promoted ${res.promotedCount} students from Sem ${selectedSemester} (${selectedSection}) to Sem ${selectedSemester + 1}.`,
+      });
+      setPromoteModalOpen(false);
+      await loadContext();
+      await loadSectionStudents();
+    } catch (err) {
+      setPromoteError(err instanceof Error ? err.message : 'Failed to promote students to next semester.');
+    } finally {
+      setPromoting(false);
+    }
+  };
+
+  const handleGraduateSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setGraduateError('');
+    setGraduating(true);
+    try {
+      const res = await studentService.graduateSemester8Students({
+        section: selectedSection || undefined,
+      });
+      setFeedback({
+        type: 'success',
+        text: res.message || `Successfully graduated ${res.graduatedCount} Semester 8 students.`,
+      });
+      setGraduateModalOpen(false);
+      await loadContext();
+      await loadSectionStudents();
+    } catch (err) {
+      setGraduateError(err instanceof Error ? err.message : 'Failed to graduate Semester 8 students.');
+    } finally {
+      setGraduating(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Page Title & Common Semester Selector */}
@@ -1050,6 +1110,35 @@ export const SetupClassPage: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-2">
+              {selectedSection && selectedSemester < 8 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPromoteError('');
+                    setTargetPromoteSection(selectedSection);
+                    setPromoteModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+                  title={`Promote ${selectedSection} students to Semester ${selectedSemester + 1}`}
+                >
+                  <ArrowUpRight className="w-3.5 h-3.5" />
+                  <span>Promote to Sem {selectedSemester + 1}</span>
+                </button>
+              )}
+              {selectedSection && selectedSemester === 8 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGraduateError('');
+                    setGraduateModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+                  title="Graduate / Archive Semester 8 class"
+                >
+                  <GraduationCap className="w-3.5 h-3.5" />
+                  <span>Graduate Class</span>
+                </button>
+              )}
               {selectedSection && (
                 <button
                   type="button"
@@ -1738,6 +1827,134 @@ export const SetupClassPage: React.FC = () => {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Promote Students to Next Semester Modal */}
+      {promoteModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+        >
+          <div className="bg-white dark:bg-slate-900 rounded-xl max-w-md w-full border border-[#D9E2EF] dark:border-slate-800 shadow-xl overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#D9E2EF] dark:border-slate-800 bg-[#F5F7FB] dark:bg-slate-950/60">
+              <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
+                <ArrowUpRight className="w-5 h-5" />
+                <h3 className="text-base font-bold text-[#17243A] dark:text-white">
+                  Promote Students to Semester {selectedSemester + 1}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPromoteModalOpen(false)}
+                className="p-1 rounded-md text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handlePromoteSubmit} className="p-6 space-y-4">
+              <div className="p-3.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-800 dark:text-emerald-300 space-y-1">
+                <div className="font-semibold">Batch Progression:</div>
+                <div>All active enrolled students in <strong>Semester {selectedSemester} ({selectedSection})</strong> will be advanced to <strong>Semester {selectedSemester + 1}</strong> atomically.</div>
+                <div className="text-[11px] text-emerald-700 dark:text-emerald-400">USNs, examination history, and result records remain fully preserved.</div>
+              </div>
+
+              {promoteError && (
+                <div className="p-3 rounded-md bg-[#B42318]/10 border border-[#B42318]/30 text-xs font-medium text-[#B42318] dark:text-red-300">
+                  {promoteError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-[#17243A] dark:text-slate-200 mb-1">
+                  Target Section in Semester {selectedSemester + 1}
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={targetPromoteSection}
+                  onChange={(e) => setTargetPromoteSection(e.target.value.toUpperCase())}
+                  placeholder={`e.g. ${selectedSection}`}
+                  className="w-full px-3 py-2 text-sm font-semibold rounded-md border border-[#D9E2EF] dark:border-slate-700 bg-white dark:bg-slate-800 text-[#17243A] dark:text-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2.5 pt-2 border-t border-[#D9E2EF] dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setPromoteModalOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold rounded-md border border-[#D9E2EF] dark:border-slate-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={promoting}
+                  className="px-4 py-2 text-xs font-semibold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 cursor-pointer"
+                >
+                  {promoting ? 'Promoting...' : `Confirm Promotion to Sem ${selectedSemester + 1}`}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Graduate Semester 8 Modal */}
+      {graduateModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+        >
+          <div className="bg-white dark:bg-slate-900 rounded-xl max-w-md w-full border border-[#D9E2EF] dark:border-slate-800 shadow-xl overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#D9E2EF] dark:border-slate-800 bg-[#F5F7FB] dark:bg-slate-950/60">
+              <div className="flex items-center gap-2 text-indigo-600 dark:text-indigo-400">
+                <GraduationCap className="w-5 h-5" />
+                <h3 className="text-base font-bold text-[#17243A] dark:text-white">
+                  Graduate Semester 8 Students
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setGraduateModalOpen(false)}
+                className="p-1 rounded-md text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleGraduateSubmit} className="p-6 space-y-4">
+              <div className="p-3.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-800 dark:text-indigo-300 space-y-1">
+                <div className="font-semibold">Graduation & Archival:</div>
+                <div>All active enrolled students in <strong>Semester 8 {selectedSection ? `(${selectedSection})` : ''}</strong> will be marked as <strong>GRADUATED</strong>.</div>
+                <div className="text-[11px] text-indigo-700 dark:text-indigo-400">Academic transcripts, result imports, and exam history remain permanently accessible for institutional reporting.</div>
+              </div>
+
+              {graduateError && (
+                <div className="p-3 rounded-md bg-[#B42318]/10 border border-[#B42318]/30 text-xs font-medium text-[#B42318] dark:text-red-300">
+                  {graduateError}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2.5 pt-2 border-t border-[#D9E2EF] dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setGraduateModalOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold rounded-md border border-[#D9E2EF] dark:border-slate-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={graduating}
+                  className="px-4 py-2 text-xs font-semibold rounded-md bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50 cursor-pointer"
+                >
+                  {graduating ? 'Graduating...' : 'Confirm Graduation / Archive'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -4,8 +4,18 @@ import ExcelJS from 'exceljs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import fs from 'fs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const STUDENT_TEMPLATE_PATH = path.resolve(__dirname, '../../../../client/public/templates/std_template.xlsx');
+const candidateStudentTemplatePaths = [
+  path.resolve(__dirname, '../../../../public/templates/std_template.xlsx'),
+  path.resolve(__dirname, '../../../public/templates/std_template.xlsx'),
+  path.resolve(__dirname, '../../../../dist/templates/std_template.xlsx'),
+  path.resolve(process.cwd(), 'admin-portal (7)/public/templates/std_template.xlsx'),
+  path.resolve(process.cwd(), 'public/templates/std_template.xlsx'),
+  path.resolve(__dirname, '../../../../client/public/templates/std_template.xlsx')
+];
+const STUDENT_TEMPLATE_PATH = candidateStudentTemplatePaths.find(p => fs.existsSync(p)) || candidateStudentTemplatePaths[0];
 
 /**
  * Standard Student List Exporter

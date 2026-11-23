@@ -1091,7 +1091,9 @@ public class StudentService {
                         SELECT sr.section, sr.semester, coalesce(d.code, 'OTHER') AS dept_code
                         FROM student_roster sr
                         LEFT JOIN department d ON d.id = sr.department_id
+                        LEFT JOIN academic_group ag ON ag.id = sr.group_id
                         WHERE sr.usn = ? AND sr.status = 'ACTIVE'
+                          AND (ag.status IS NULL OR ag.status = 'ACTIVE')
                           AND (sr.department_id <> ? OR sr.semester <> ? OR upper(regexp_replace(sr.section, '(?i)^section\\s+', '')) <> ?)
                         """;
                 try (PreparedStatement ps = db.prepareStatement(conflictSql)) {
@@ -1520,7 +1522,9 @@ public class StudentService {
                 SELECT sr.section, sr.semester, coalesce(d.code, 'OTHER') AS dept_code
                 FROM student_roster sr
                 LEFT JOIN department d ON d.id = sr.department_id
+                LEFT JOIN academic_group ag ON ag.id = sr.group_id
                 WHERE sr.usn = ? AND sr.status = 'ACTIVE'
+                  AND (ag.status IS NULL OR ag.status = 'ACTIVE')
                   AND (sr.department_id <> ? OR sr.semester <> ? OR upper(regexp_replace(sr.section, '(?i)^section\\s+', '')) <> ?)
                 """;
         try (PreparedStatement ps = db.prepareStatement(conflictSql)) {
@@ -1856,7 +1860,9 @@ public class StudentService {
                         SELECT sr.section, sr.semester, coalesce(d.code, 'OTHER') AS dept_code
                         FROM student_roster sr
                         LEFT JOIN department d ON d.id = sr.department_id
+                        LEFT JOIN academic_group ag ON ag.id = sr.group_id
                         WHERE sr.usn = ? AND sr.status = 'ACTIVE'
+                          AND (ag.status IS NULL OR ag.status = 'ACTIVE')
                           AND (sr.department_id <> ? OR sr.semester <> ? OR upper(regexp_replace(sr.section, '(?i)^section\\s+', '')) <> ?)
                         """;
                 try (PreparedStatement ps = db.prepareStatement(sql)) {

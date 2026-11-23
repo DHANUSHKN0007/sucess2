@@ -12,6 +12,7 @@ import {
   SittingName,
   SittingPackageStatus,
   SittingQuestionPaperArchive,
+  ArchivedQuestionSetData,
   SubjectInfo,
   PublishedQuestionSetFeedItem,
 } from '../types/examination';
@@ -868,6 +869,38 @@ export const examinationService = {
       { method: 'GET' }
     );
     return res.data;
+  },
+
+  /**
+   * Retrieves the structured JSON question set data including complete questions, options,
+   * module distributions, and confidential evaluation key.
+   */
+  async getQuestionPaperArchiveData(
+    examinationId: string,
+    sittingId: string
+  ): Promise<ArchivedQuestionSetData> {
+    const res = await apiClient.centralRequest<ArchivedQuestionSetData>(
+      `/examinations/${encodeURIComponent(examinationId)}/sittings/${encodeURIComponent(
+        sittingId
+      )}/question-paper-archive/data`,
+      { method: 'GET' }
+    );
+    return res.data;
+  },
+
+  /**
+   * Downloads the genuine backend-generated multi-sheet Excel workbook (.xlsx).
+   */
+  async downloadQuestionPaperXlsx(
+    examinationId: string,
+    sittingId: string
+  ): Promise<{ blob: Blob; contentType: string; filename?: string }> {
+    return apiClient.centralBlobRequest(
+      `/examinations/${encodeURIComponent(examinationId)}/sittings/${encodeURIComponent(
+        sittingId
+      )}/question-paper-archive/download-excel`,
+      { method: 'GET' }
+    );
   },
 
   /**

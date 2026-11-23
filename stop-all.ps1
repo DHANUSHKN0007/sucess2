@@ -30,8 +30,8 @@ if (Test-Path $pidsPath) {
     } catch {}
 }
 
-# 2. Stop any remaining processes listening on target ports (8081, 8082, 3000, 3001, 3002)
-$targetPorts = @(8081, 8082, 3000, 3001, 3002)
+# 2. Stop any remaining processes listening on target ports (8081, 8082, 3000, 3001, 3002, 5001)
+$targetPorts = @(8081, 8082, 3000, 3001, 3002, 5001)
 foreach ($port in $targetPorts) {
     $connections = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
     if ($connections) {

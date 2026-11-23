@@ -24,5 +24,6 @@ check_port "Independent Lab Server" 8082
 check_port "HOD / Faculty Portal" 3000
 check_port "COE Examination Portal" 3001
 check_port "Student Examination Portal" 3002
+check_port "Document Converter API" 5001
 
 echo "===================================================================="

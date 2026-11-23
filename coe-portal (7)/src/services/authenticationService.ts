@@ -113,4 +113,17 @@ export const authenticationService = {
 
     return res.data;
   },
+
+  async updateProfile(fullName?: string, email?: string, contactNumber?: string): Promise<AuthResponse['user']> {
+    const res = await apiClient.centralRequest<AuthResponse['user']>('/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({ fullName, email, contactNumber }),
+    });
+    const cur = this.getCurrentSession();
+    if (cur && res.data) {
+      cur.user = { ...cur.user, ...res.data };
+      sessionStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(cur));
+    }
+    return res.data;
+  },
 };

@@ -2618,8 +2618,9 @@ public final class LabServer {
 
     @SuppressWarnings("unchecked")
     private static Map<String, Object> buildSessionMonitoringData(long examId, Map<String, Object> pkg, long now) {
-        String sitCode = RuntimeState.activeSittingName != null ? RuntimeState.activeSittingName : "MORNING";
-        Map<String, Object> meta = RuntimeState.sessionMetadata;
+        CohortState cohort = RuntimeState.activeCohorts.get(examId);
+        String sitCode = (cohort != null && cohort.sittingName != null) ? cohort.sittingName : (RuntimeState.activeSittingName != null ? RuntimeState.activeSittingName : "MORNING");
+        Map<String, Object> meta = (cohort != null && !cohort.sessionMetadata.isEmpty()) ? cohort.sessionMetadata : RuntimeState.sessionMetadata;
         String dept = (String) meta.getOrDefault("department", "CSE");
         int semester = (int) parseLongSafe(meta.getOrDefault("semester", 5));
         String subCode = (String) meta.getOrDefault("subjectCode", "21CS51");
@@ -2628,7 +2629,8 @@ public final class LabServer {
         String startTime = (String) meta.getOrDefault("startTime", "09:30:00");
         int durationMinutes = (int) parseLongSafe(meta.getOrDefault("durationMinutes", 90));
 
-        int totalEligible = RuntimeState.roster.size();
+        Map<String, Map<String, Object>> rosterMap = (cohort != null && !cohort.roster.isEmpty()) ? cohort.roster : RuntimeState.roster;
+        int totalEligible = rosterMap.size();
         int loggedIn = 0;
         int started = 0;
         int submitted = 0;
@@ -2641,13 +2643,17 @@ public final class LabServer {
 
         List<Map<String, Object>> students = new ArrayList<>();
 
-        for (Map.Entry<String, Map<String, Object>> entry : RuntimeState.roster.entrySet()) {
+        for (Map.Entry<String, Map<String, Object>> entry : rosterMap.entrySet()) {
             String usn = entry.getKey();
             Map<String, Object> details = entry.getValue();
-            String subKey = examId + ":" + usn;
-            boolean isSub = RuntimeState.studentSubmissions.containsKey(subKey);
             String token = RuntimeState.usnToSessionToken.get(usn);
             Map<String, Object> sess = token != null ? RuntimeState.studentSessions.get(token) : null;
+            String subKey = examId + ":" + usn;
+            boolean isSub = RuntimeState.studentSubmissions.containsKey(subKey)
+                    || (sess != null && Boolean.TRUE.equals(sess.get("submitted")));
+            if (isSub && !RuntimeState.studentSubmissions.containsKey(subKey)) {
+                RuntimeState.studentSubmissions.put(subKey, System.currentTimeMillis());
+            }
             Map<String, Object> lock = RuntimeState.studentLockStates.get(usn);
             boolean isLocked = lock != null && Boolean.TRUE.equals(lock.get("isLocked"));
             int vCount = lock != null ? ((Number) lock.getOrDefault("violationCount", 0)).intValue() : 0;
@@ -2682,6 +2688,7 @@ public final class LabServer {
                     Map<String, Object> rcpt = RuntimeState.studentReceipts.get(subKey);
                     if (rcpt != null && rcpt.get("submissionTrigger") != null) trigger = String.valueOf(rcpt.get("submissionTrigger"));
                     curStatus = "AUTO_TIMER_EXPIRED".equalsIgnoreCase(trigger) ? "Auto Submitted" : "Submitted";
+                    connStatus = "Offline";
                 } else if (hasPendingRecovery) {
                     pendingRecovery++;
                     curStatus = "Recovery Pending";
@@ -2704,12 +2711,28 @@ public final class LabServer {
                 } else {
                     curStatus = "Authenticated";
                 }
+            } else if (isSub) {
+                submitted++;
+                Map<String, Object> rcpt = RuntimeState.studentReceipts.get(subKey);
+                String trigger = "MANUAL";
+                if (rcpt != null) {
+                    if (rcpt.get("submissionTrigger") != null) trigger = String.valueOf(rcpt.get("submissionTrigger"));
+                    if (rcpt.get("assignedWorkstationId") != null) wsId = String.valueOf(rcpt.get("assignedWorkstationId"));
+                    if (rcpt.get("submittedAt") != null) {
+                        try {
+                            hbMs = Instant.parse(String.valueOf(rcpt.get("submittedAt"))).toEpochMilli();
+                        } catch (Exception ignored) {}
+                    }
+                }
+                if (wsId != null) activeComputers.add(wsId);
+                curStatus = "AUTO_TIMER_EXPIRED".equalsIgnoreCase(trigger) ? "Auto Submitted" : "Submitted";
+                connStatus = "Offline";
             } else {
                 curStatus = "Not Started";
             }
 
             String section = (String) details.getOrDefault("originalSection", details.getOrDefault("section", "A"));
-            String version = RuntimeState.studentAssignedVersion.getOrDefault(usn, "A");
+            String version = (cohort != null && cohort.studentAssignedVersion.containsKey(usn)) ? cohort.studentAssignedVersion.get(usn) : RuntimeState.studentAssignedVersion.getOrDefault(usn, "A");
 
             Map<String, Object> sRec = new LinkedHashMap<>();
             sRec.put("studentUsn", usn);
@@ -2720,11 +2743,11 @@ public final class LabServer {
             sRec.put("assignedVersion", version);
             sRec.put("workstationId", wsId);
             sRec.put("currentPcNumber", wsId != null ? wsId : "Not Assigned");
-            sRec.put("workstationBindingStatus", wsId != null ? "Active" : "Unbound");
+            sRec.put("workstationBindingStatus", wsId != null ? (isSub ? "Completed" : "Active") : "Unbound");
             sRec.put("currentStatus", curStatus);
-            sRec.put("loginStatus", sess != null ? "Logged In" : "Not Logged In");
+            sRec.put("loginStatus", sess != null ? "Logged In" : (isSub ? "Submitted" : "Not Logged In"));
             sRec.put("examinationStatus", isSub ? "Submitted" : (isLocked ? "Locked (Suspicious Event)" : (examStarted ? "In Progress" : "Not Started")));
-            sRec.put("connectionStatus", connStatus);
+            sRec.put("connectionStatus", isSub ? "Offline" : connStatus);
             sRec.put("lastHeartbeat", hbMs > 0 ? Instant.ofEpochMilli(hbMs).toString() : null);
             sRec.put("lastHeartbeatMs", hbMs);
             sRec.put("instructionsViewed", instrConfirmed);

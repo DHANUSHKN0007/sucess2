@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  Settings,
   X,
 } from 'lucide-react';
 import { InstitutionLogo } from '../components/InstitutionLogo';
@@ -35,11 +36,12 @@ const HOD_NAV_ITEMS = [
     syncSemester: false,
   },
   { label: 'Audit Logs', to: '/admin/hod/audit-logs', icon: ClipboardList, syncSemester: false },
+  { label: 'Settings', to: '/admin/hod/profile-settings', icon: Settings, syncSemester: false },
 ];
 
 const HodLayoutShell: React.FC = () => {
   const location = useLocation();
-  const { logout } = useAuth();
+  const { user, logout } = useAuth();
   const { selectedSemester } = useHodSemester();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -55,9 +57,9 @@ const HodLayoutShell: React.FC = () => {
     item.syncSemester ? `${item.to}?semester=${selectedSemester}` : item.to;
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row bg-[#F5F7FB] dark:bg-slate-950 text-[#1F2937] dark:text-slate-100 transition-colors">
+    <div className="h-screen overflow-hidden flex flex-col lg:flex-row bg-[#F5F7FB] dark:bg-slate-950 text-[#1F2937] dark:text-slate-100 transition-colors">
       {/* Mobile Header Bar */}
-      <header className="lg:hidden sticky top-0 z-40 flex items-center justify-between px-4 py-3 bg-[#17243A] text-white border-b border-slate-800">
+      <header className="lg:hidden shrink-0 sticky top-0 z-40 flex items-center justify-between px-4 py-3 bg-[#17243A] text-white border-b border-slate-800">
         <InstitutionLogo variant="mobile-bar" subtitle="HOD Portal" />
         <div className="flex items-center gap-2">
           <AccountMenu profileSettingsPath="/admin/hod/profile-settings" />
@@ -125,7 +127,7 @@ const HodLayoutShell: React.FC = () => {
 
       {/* Desktop Sticky Sidebar */}
       <aside
-        className={`hidden lg:flex flex-col shrink-0 bg-[#17243A] text-white border-r border-slate-800 sticky top-0 h-screen transition-all duration-150 ${
+        className={`hidden lg:flex flex-col shrink-0 bg-[#17243A] text-white border-r border-slate-800 h-full transition-all duration-150 ${
           collapsed ? 'w-20' : 'w-68'
         }`}
       >
@@ -171,38 +173,44 @@ const HodLayoutShell: React.FC = () => {
               </Link>
             );
           })}
+        </nav>
+
+        {/* Bottom Authenticated HOD Area & Logout */}
+        <div className="p-3.5 border-t border-white/10 bg-[#131E31] space-y-2">
+          {!collapsed && user && (
+            <div className="px-2 py-1">
+              <div className="text-xs font-semibold text-white truncate">{user.fullName}</div>
+              <div className="text-[11px] text-slate-400 truncate">
+                {user.departmentName || user.departmentCode}
+              </div>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => logout()}
             title={collapsed ? 'Logout' : undefined}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-[13.5px] font-medium text-red-400 hover:bg-red-500/10 transition-colors ${
+            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-xs font-semibold text-red-400 hover:bg-red-500/15 hover:text-red-300 transition-colors cursor-pointer ${
               collapsed ? 'justify-center' : ''
             }`}
           >
             <LogOut className="w-4 h-4 shrink-0" />
-            {!collapsed && <span className="leading-snug">Logout</span>}
+            {!collapsed && <span>Logout</span>}
           </button>
-        </nav>
-
-        {!collapsed && (
-          <div className="p-3.5 border-t border-white/10 bg-[#131E31]">
-            <div className="text-[11px] text-slate-400 leading-relaxed truncate">
-              Maharaja Institute of Technology Mysore
-            </div>
-          </div>
-        )}
+        </div>
       </aside>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="hidden lg:flex sticky top-0 z-30 bg-white dark:bg-slate-900 border-b border-[#D9E2EF] dark:border-slate-800 px-6 py-3 items-center justify-end gap-6">
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
+        <header className="hidden lg:flex shrink-0 bg-white dark:bg-slate-900 border-b border-[#D9E2EF] dark:border-slate-800 px-6 py-3 items-center justify-end gap-6">
           <AccountMenu profileSettingsPath="/admin/hod/profile-settings" />
         </header>
 
-        <main className="flex-1 p-5 sm:p-6 lg:p-8 max-w-[1440px] w-full mx-auto">
-          <ErrorBoundary>
-            <Outlet />
-          </ErrorBoundary>
+        <main className="flex-1 overflow-y-auto p-5 sm:p-6 lg:p-8 w-full">
+          <div className="max-w-[1440px] mx-auto w-full">
+            <ErrorBoundary>
+              <Outlet />
+            </ErrorBoundary>
+          </div>
         </main>
       </div>
     </div>

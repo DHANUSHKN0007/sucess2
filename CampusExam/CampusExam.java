@@ -14,6 +14,7 @@ import java.sql.*;
 import java.time.*;
 import java.time.format.*;
 import java.util.*;
+import java.util.zip.*;
 import java.util.concurrent.*;
 import java.util.regex.*;
 import javax.crypto.*;
@@ -488,13 +489,15 @@ public final class CampusExam {
             }
         }
         int port = Integer.parseInt(env("PORT", "8081"));
-        HttpServer server = HttpServer.create(new InetSocketAddress(env("BIND", "127.0.0.1"), port), 128);
+        int backlog = Integer.parseInt(env("SERVER_BACKLOG", "1024"));
+        int threads = Integer.parseInt(env("SERVER_THREADS", "32"));
+        HttpServer server = HttpServer.create(new InetSocketAddress(env("BIND", "127.0.0.1"), port), backlog);
         server.createContext("/api/", CampusExam::handle);
         server.createContext("/lab-api/", CampusExam::handle);
         server.createContext("/monitoring/", CampusExam::handle);
         server.createContext("/labs/", CampusExam::handle);
         server.createContext("/", CampusExam::handleStatic);
-        server.setExecutor(Executors.newFixedThreadPool(16));
+        server.setExecutor(Executors.newFixedThreadPool(threads));
         Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(CampusExam::expire, 0, 2, TimeUnit.SECONDS);
         server.start();
         System.out.println("MIT Mysore Examination System listening on " + server.getAddress());
@@ -701,11 +704,20 @@ public final class CampusExam {
             String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
             check(method.equals("GET") || method.equals("POST") || method.equals("PUT") || method.equals("PATCH") || method.equals("DELETE"), 405, "Method not allowed: " + method);
 
-            byte[] body = exchange.getRequestBody().readNBytes(25165824); // support up to 24MB for PDF uploads
-            check(body.length <= 25165823, 413, "Request payload exceeds 24MB limit");
+            byte[] body = exchange.getRequestBody().readNBytes(57671680); // support up to 55MB for 50MB PDF uploads
+            check(body.length <= 57671679, 413, "Request payload exceeds 50MB upload limit");
 
             String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
             Form form = parseBody(method, contentType, body, exchange.getRequestURI().getRawQuery());
+
+            if ((path.equals("v1/health") || path.equals("health")) && method.equals("GET")) {
+                byte[] resBytes = (isV1 ? v1Success(Map.of("status", "ok"), "System operational") : "{\"status\":\"ok\"}").getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+                exchange.sendResponseHeaders(200, resBytes.length);
+                exchange.getResponseBody().write(resBytes);
+                exchange.getResponseBody().close();
+                return;
+            }
 
             try (Connection db = connect()) {
                 db.setAutoCommit(false);
@@ -862,72 +874,38 @@ public final class CampusExam {
                 response = v1Error("DATABASE_ERROR", "Unable to load document: " + e.getMessage());
                 status = 500;
             }
-        } else if (response != null && response.startsWith("__QUESTION_PAPER_PDF__:")) {
-            String[] parts = response.substring("__QUESTION_PAPER_PDF__:".length()).split(":");
+        } else if (response != null && (response.startsWith("__QUESTION_PAPER_PDF__:") || response.startsWith("__QUESTION_PAPER_XLSX__:"))) {
+            boolean isExcel = response.startsWith("__QUESTION_PAPER_XLSX__:");
+            String prefix = isExcel ? "__QUESTION_PAPER_XLSX__:" : "__QUESTION_PAPER_PDF__:";
+            String[] parts = response.substring(prefix.length()).split(":");
             long eid = Long.parseLong(parts[0]);
             String sitName = parts.length > 1 ? parts[1].toUpperCase(Locale.ROOT) : "MORNING";
             if (sitName.endsWith("-M") || sitName.contains("MORN")) sitName = "MORNING";
             else if (sitName.endsWith("-A") || sitName.contains("AFT")) sitName = "AFTERNOON";
             try (Connection db = connect()) {
-                String subCode = "CS301";
-                String subName = "Examination Paper";
-                int setNum = 1;
-                long selPaperId = 0L;
+                Map<String, Object> archiveData = fetchArchiveData(db, eid, sitName);
+                @SuppressWarnings("unchecked")
+                Map<String, Object> meta = (Map<String, Object>) archiveData.get("metadata");
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> questions = (List<Map<String, Object>>) archiveData.get("questions");
+                String subCode = String.valueOf(meta.getOrDefault("subjectCode", "CS301"));
+                int setNum = meta.get("paperSetNumber") instanceof Number n ? n.intValue() : 1;
 
-                try (var st = sql(db, """
-                        SELECT esit.selected_paper_id, coalesce(gp.paper_number, 1), s.code, s.name
-                        FROM examination_sitting esit
-                        JOIN examination_session es ON es.id = esit.session_id
-                        JOIN subject s ON s.id = es.subject_id
-                        LEFT JOIN generated_paper gp ON gp.id = esit.selected_paper_id
-                        WHERE esit.session_id = ? AND esit.sitting_name = ?
-                        """, eid, sitName); var rs = st.executeQuery()) {
-                    if (rs.next()) {
-                        selPaperId = rs.getObject(1) == null ? 0L : rs.getLong(1);
-                        setNum = rs.getInt(2);
-                        subCode = rs.getString(3);
-                        subName = rs.getString(4);
-                    }
+                if (isExcel) {
+                    byte[] xlsxBytes = buildQuestionPaperXlsxBytes(meta, questions);
+                    exchange.getResponseHeaders().set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+                    exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + subCode + "_Set_" + setNum + "_Archive.xlsx\"");
+                    binaryResponse = xlsxBytes;
+                    response = null;
+                } else {
+                    byte[] pdfBytes = generateQuestionPaperPdf(meta, questions);
+                    exchange.getResponseHeaders().set("Content-Type", "application/pdf");
+                    exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + subCode + "_Set_" + setNum + "_Archive.pdf\"");
+                    binaryResponse = pdfBytes;
+                    response = null;
                 }
-                if (selPaperId == 0L) {
-                    try {
-                        String sStr = one(db, "SELECT coalesce(selected_paper_id, 0) FROM examination_session WHERE id=?", eid);
-                        if (!sStr.isBlank()) selPaperId = Long.parseLong(sStr);
-                    } catch (Exception ignored) {}
-                }
-
-                List<Map<String, Object>> questions = new ArrayList<>();
-                if (selPaperId > 0) {
-                    try (var st = sql(db, """
-                            SELECT gpq.paper_position, qbi.module_number, qbi.prompt, qbi.options
-                            FROM generated_paper_question gpq
-                            JOIN question_bank_item qbi ON qbi.id = gpq.question_id
-                            WHERE gpq.paper_id = ?
-                            ORDER BY gpq.paper_position ASC
-                            """, selPaperId); var rs = st.executeQuery()) {
-                        while (rs.next()) {
-                            Map<String, Object> q = new LinkedHashMap<>();
-                            q.put("sequenceNumber", rs.getInt(1));
-                            q.put("moduleNumber", rs.getInt(2));
-                            q.put("prompt", rs.getString(3));
-                            java.sql.Array arr = rs.getArray(4);
-                            String[] opts = arr != null ? (String[]) arr.getArray() : new String[0];
-                            q.put("optionA", opts.length > 0 ? opts[0] : "");
-                            q.put("optionB", opts.length > 1 ? opts[1] : "");
-                            q.put("optionC", opts.length > 2 ? opts[2] : "");
-                            q.put("optionD", opts.length > 3 ? opts[3] : "");
-                            questions.add(q);
-                        }
-                    }
-                }
-
-                byte[] pdfBytes = generateQuestionPaperPdf("Maharaja Institute of Technology Mysore", subCode, subName, setNum, questions);
-                exchange.getResponseHeaders().set("Content-Type", "application/pdf");
-                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + subCode + "_Set_" + setNum + "_Archive.pdf\"");
-                binaryResponse = pdfBytes;
-                response = null;
             } catch (Exception e) {
-                response = v1Error("PDF_GENERATION_ERROR", "Failed to generate question paper archive PDF: " + e.getMessage());
+                response = v1Error("EXPORT_GENERATION_ERROR", "Failed to generate question paper archive: " + e.getMessage());
                 status = 500;
             }
         }
@@ -1070,17 +1048,17 @@ public final class CampusExam {
 
     static void bootstrapOfficialAccounts(Connection db) throws Exception {
         String[][] depts = {
-            {"CIVIL", "Civil Engineering"},
-            {"CSE", "Computer Science & Engineering"},
-            {"CSE-AI", "CSE - Artificial Intelligence"},
-            {"CSE-DS", "CSE - Data Science"},
-            {"CSE-BS", "CSE - Business Systems"},
-            {"CSE-AIML", "CSE - AI & ML"},
-            {"CSE-IOTCS", "CSE - IoT & Cyber Security incl. Blockchain"},
-            {"COMP", "Computer Engineering"},
-            {"ECE", "Electronics & Communication Engineering"},
-            {"ISE", "Information Science & Engineering"},
-            {"MECH", "Mechanical Engineering"}
+            {"E158CV", "Civil Engineering"},
+            {"E158CS", "Computer Science & Engineering"},
+            {"E158CA", "CSE - Artificial Intelligence"},
+            {"E158CD", "CSE - Data Science"},
+            {"E158CB", "CSE - Business Systems"},
+            {"E158CI", "CSE - AI & ML"},
+            {"E158IC", "CSE - IoT & Cyber Security incl. Blockchain"},
+            {"E158CE", "Computer Engineering"},
+            {"E158EC", "Electronics & Communication Engineering"},
+            {"E158IS", "Information Science & Engineering"},
+            {"E158ME", "Mechanical Engineering"}
         };
         for (String[] d : depts) {
             run(db, "INSERT INTO department (code, name) VALUES (?, ?) ON CONFLICT (code) DO NOTHING", d[0], d[1]);
@@ -1099,17 +1077,17 @@ public final class CampusExam {
             {"admin", "ADMIN@7157", "ADMIN", null, "System Administrator", "Central Administrator"},
             {"principal", "PRINCIPAL@7658", "PRINCIPAL", null, "Principal", "Principal & Chief Academic Officer"},
             {"coe", "COE@5828", "COE", null, "Controller of Examinations", "Controller of Examinations"},
-            {"hod.civil", "CIVIL@0134", "HOD", "CIVIL", "HOD Civil Engineering", "Head of Department"},
-            {"hod.cse", "CSE@2109", "HOD", "CSE", "HOD Computer Science & Engineering", "Head of Department"},
-            {"hod.cse.ai", "CSEAI@4939", "HOD", "CSE-AI", "HOD CSE - Artificial Intelligence", "Head of Department"},
-            {"hod.cse.ds", "CSEDS@4636", "HOD", "CSE-DS", "HOD CSE - Data Science", "Head of Department"},
-            {"hod.cse.bs", "CSEBS@1588", "HOD", "CSE-BS", "HOD CSE - Business Systems", "Head of Department"},
-            {"hod.cse.aiml", "AIML@1504", "HOD", "CSE-AIML", "HOD CSE - AI & ML", "Head of Department"},
-            {"hod.cse.iotcs", "IOTCS@7534", "HOD", "CSE-IOTCS", "HOD CSE - IoT & Cyber Security", "Head of Department"},
-            {"hod.comp", "COMPENG@5354", "HOD", "COMP", "HOD Computer Engineering", "Head of Department"},
-            {"hod.ece", "ECE@5175", "HOD", "ECE", "HOD Electronics & Communication Engineering", "Head of Department"},
-            {"hod.ise", "ISE@3325", "HOD", "ISE", "HOD Information Science & Engineering", "Head of Department"},
-            {"hod.mech", "MECH@9626", "HOD", "MECH", "HOD Mechanical Engineering", "Head of Department"}
+            {"hod.civil", "CIVIL@0134", "HOD", "E158CV", "HOD Civil Engineering", "Head of Department"},
+            {"hod.cse", "CSE@2109", "HOD", "E158CS", "HOD Computer Science & Engineering", "Head of Department"},
+            {"hod.cse.ai", "CSEAI@4939", "HOD", "E158CA", "HOD CSE - Artificial Intelligence", "Head of Department"},
+            {"hod.cse.ds", "CSEDS@4636", "HOD", "E158CD", "HOD CSE - Data Science", "Head of Department"},
+            {"hod.cse.bs", "CSEBS@1588", "HOD", "E158CB", "HOD CSE - Business Systems", "Head of Department"},
+            {"hod.cse.aiml", "AIML@1504", "HOD", "E158CI", "HOD CSE - AI & ML", "Head of Department"},
+            {"hod.cse.iotcs", "IOTCS@7534", "HOD", "E158IC", "HOD CSE - IoT & Cyber Security", "Head of Department"},
+            {"hod.comp", "COMPENG@5354", "HOD", "E158CE", "HOD Computer Engineering", "Head of Department"},
+            {"hod.ece", "ECE@5175", "HOD", "E158EC", "HOD Electronics & Communication Engineering", "Head of Department"},
+            {"hod.ise", "ISE@3325", "HOD", "E158IS", "HOD Information Science & Engineering", "Head of Department"},
+            {"hod.mech", "MECH@9626", "HOD", "E158ME", "HOD Mechanical Engineering", "Head of Department"}
         };
 
         for (String[] acc : accounts) {
@@ -1121,7 +1099,7 @@ public final class CampusExam {
             String designation = acc[5];
             Long dId = null;
             if (deptCode != null) {
-                String dIdStr = one(db, "SELECT id FROM department WHERE code=?", deptCode);
+                String dIdStr = one(db, "SELECT id FROM department WHERE code = ? OR code = ? ORDER BY id ASC LIMIT 1", deptCode, deptCode.replace("E158", ""));
                 if (!dIdStr.isEmpty()) dId = Long.parseLong(dIdStr);
             }
             String pHash = passwordHash(rawPass);
@@ -1130,7 +1108,7 @@ public final class CampusExam {
                 run(db, "INSERT INTO account(username, password_hash, role, department_id, full_name, email, employee_id, designation, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')",
                     uName, pHash, role, dId, fullName, uName + "@mitmysore.in", "EMP-" + uName.toUpperCase(Locale.ROOT), designation);
             } else {
-                run(db, "UPDATE account SET password_hash = ?, role = ?, department_id = COALESCE(?, department_id), full_name = ?, designation = ?, status = 'ACTIVE' WHERE id = ?",
+                run(db, "UPDATE account SET password_hash = ?, role = ?, department_id = COALESCE(department_id, ?), full_name = ?, designation = ?, status = 'ACTIVE' WHERE id = ?",
                     pHash, role, dId, fullName, designation, Long.parseLong(existingId));
             }
         }
@@ -3027,7 +3005,7 @@ public final class CampusExam {
             user.put("email", email != null && !email.isBlank() ? email : username + "@mitmysore.in");
             user.put("username", username);
             user.put("role", "ADMIN".equalsIgnoreCase(role) ? "PRINCIPAL" : role);
-            user.put("designation", designation != null && !designation.isBlank() ? designation : (role.equalsIgnoreCase("PRINCIPAL") || role.equalsIgnoreCase("ADMIN") ? "Principal & Professor" : "Head of Department"));
+            user.put("designation", designation != null && !designation.isBlank() ? designation : (role.equalsIgnoreCase("PRINCIPAL") || role.equalsIgnoreCase("ADMIN") ? "Principal & Professor" : (role.equalsIgnoreCase("COE") ? "Controller of Examinations" : "Head of Department")));
             user.put("departmentId", deptId != null ? String.valueOf(deptId) : null);
             user.put("departmentCode", deptCode);
             user.put("departmentName", deptName);
@@ -3330,70 +3308,101 @@ public final class CampusExam {
 
     static String createV1PrincipalHod(Connection db, User user, Form form) throws Exception {
         user.require("PRINCIPAL", "ADMIN");
-        String code = form.need("departmentCode").trim().toUpperCase(Locale.ROOT);
+        String code = form.need("departmentCode").trim();
         String deptName = form.need("departmentName").trim();
         String fullName = form.need("fullName").trim();
         String employeeId = form.need("employeeId").trim().toUpperCase(Locale.ROOT);
         String email = form.need("email").trim().toLowerCase(Locale.ROOT);
         String contactNumber = form.need("contactNumber").trim();
 
-        Long deptId;
-        String existingDeptId = one(db, "SELECT id FROM department WHERE code = ?", code);
-        if (!existingDeptId.isEmpty()) {
-            deptId = Long.parseLong(existingDeptId);
+        check(!code.isBlank(), 400, "Department code is required");
+        check(!deptName.isBlank(), 400, "Department name is required");
+        check(code.matches("^[A-Za-z0-9_.-]{2,50}$"), 400, "Department code must be 2-50 characters");
+
+        // Custom or auto-generated username
+        String requestedUsername = form.get("username").isBlank() ? form.get("hodUsername") : form.get("username");
+        String username;
+        if (requestedUsername != null && !requestedUsername.isBlank()) {
+            username = requestedUsername.trim().toLowerCase(Locale.ROOT);
+            check(username.matches("^[a-z0-9_.-]{3,50}$"), 400, "Username must be 3-50 characters (letters, numbers, underscores)");
+            String existingUser = one(db, "SELECT id FROM account WHERE lower(username) = lower(?)", username);
+            check(existingUser.isEmpty(), 409, "Username '" + username + "' is already in use");
         } else {
-            deptId = insert(db, "INSERT INTO department(code, name) VALUES (?, ?)", code, deptName);
+            String baseUsername = "hod_" + code.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
+            username = baseUsername;
+            int uSuffix = 1;
+            while (!one(db, "SELECT id FROM account WHERE username = ?", username).isEmpty()) {
+                username = baseUsername + "_" + (++uSuffix);
+            }
         }
 
-        String baseUsername = "hod_" + code.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
-        String username = baseUsername;
-        int uSuffix = 1;
-        while (!one(db, "SELECT id FROM account WHERE username = ?", username).isEmpty()) {
-            username = baseUsername + "_" + (++uSuffix);
+        String rawPassword = form.get("password").isBlank() ? form.get("hodPassword") : form.get("password");
+        if (rawPassword == null || rawPassword.isBlank()) {
+            rawPassword = "mitm@hod123";
         }
-        String rawPassword = form.get("password").isBlank() ? "mitm@hod123" : form.get("password");
+        validatePassword(rawPassword);
         String passHash = passwordHash(rawPassword);
 
-        long accountId = insert(db, """
-                INSERT INTO account(username, password_hash, role, department_id, full_name, email, contact_number, employee_id, designation, status)
-                VALUES (?, ?, 'HOD', ?, ?, ?, ?, ?, 'Head of Department', 'ACTIVE')
-                """, username, passHash, deptId, fullName, email, contactNumber, employeeId);
+        boolean origAutoCommit = db.getAutoCommit();
+        db.setAutoCommit(false);
+        try {
+            Long deptId;
+            String existingDeptId = one(db, "SELECT id FROM department WHERE code = ?", code);
+            if (!existingDeptId.isEmpty()) {
+                deptId = Long.parseLong(existingDeptId);
+            } else {
+                deptId = insert(db, "INSERT INTO department(code, name, status) VALUES (?, ?, 'ACTIVE')", code, deptName);
+            }
 
-        insert(db, """
-                INSERT INTO hod_assignment_history(department_id, account_id, assigned_at, reason, assigned_by)
-                VALUES (?, ?, clock_timestamp(), 'Initial Department Assignment', ?)
-                """, deptId, accountId, user.id());
+            long accountId = insert(db, """
+                    INSERT INTO account(username, password_hash, role, department_id, full_name, email, contact_number, employee_id, designation, status)
+                    VALUES (?, ?, 'HOD', ?, ?, ?, ?, ?, 'Head of Department', 'ACTIVE')
+                    """, username, passHash, deptId, fullName, email, contactNumber, employeeId);
 
-        audit(db, user.id(), "CREATE_HOD_DEPARTMENT", "department:" + deptId, "Created HOD " + fullName + " (" + code + ")");
+            insert(db, """
+                    INSERT INTO hod_assignment_history(department_id, account_id, assigned_at, reason, assigned_by)
+                    VALUES (?, ?, clock_timestamp(), 'Initial Department Assignment', ?)
+                    """, deptId, accountId, user.id());
 
-        Map<String, Object> dept = new LinkedHashMap<>();
-        dept.put("id", String.valueOf(deptId));
-        dept.put("code", code);
-        dept.put("name", deptName);
-        dept.put("identificationNumber", "DEPT-" + code);
-        dept.put("hodId", String.valueOf(accountId));
-        dept.put("hodName", fullName);
-        dept.put("hodEmail", email);
-        dept.put("status", "Active");
-        dept.put("createdAt", Instant.now().toString());
+            audit(db, user.id(), "CREATE_HOD_DEPARTMENT", "department:" + deptId, "Created HOD " + fullName + " (" + code + ", " + username + ")");
 
-        Map<String, Object> hod = new LinkedHashMap<>();
-        hod.put("id", String.valueOf(accountId));
-        hod.put("employeeId", employeeId);
-        hod.put("fullName", fullName);
-        hod.put("email", email);
-        hod.put("contactNumber", contactNumber);
-        hod.put("designation", "Head of Department");
-        hod.put("departmentId", String.valueOf(deptId));
-        hod.put("departmentCode", code);
-        hod.put("status", "Active");
-        hod.put("lastLogin", "");
-        hod.put("themePreference", "system");
+            db.commit();
 
-        Map<String, Object> data = new LinkedHashMap<>();
-        data.put("department", dept);
-        data.put("hodAccount", hod);
-        return v1Success(data, "HOD account and department successfully established");
+            Map<String, Object> dept = new LinkedHashMap<>();
+            dept.put("id", String.valueOf(deptId));
+            dept.put("code", code);
+            dept.put("name", deptName);
+            dept.put("identificationNumber", "DEPT-" + code);
+            dept.put("hodId", String.valueOf(accountId));
+            dept.put("hodName", fullName);
+            dept.put("hodEmail", email);
+            dept.put("hodUsername", username);
+            dept.put("status", "Active");
+            dept.put("createdAt", Instant.now().toString());
+
+            Map<String, Object> hod = new LinkedHashMap<>();
+            hod.put("id", String.valueOf(accountId));
+            hod.put("username", username);
+            hod.put("fullName", fullName);
+            hod.put("employeeId", employeeId);
+            hod.put("email", email);
+            hod.put("contactNumber", contactNumber);
+            hod.put("departmentId", String.valueOf(deptId));
+            hod.put("departmentCode", code);
+            hod.put("departmentName", deptName);
+            hod.put("status", "Active");
+            hod.put("designation", "Head of Department");
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("department", dept);
+            resp.put("hodAccount", hod);
+            return v1Success(resp, "Department and HOD created successfully");
+        } catch (Exception ex) {
+            db.rollback();
+            throw ex;
+        } finally {
+            db.setAutoCommit(origAutoCommit);
+        }
     }
 
     static String deleteV1PrincipalHod(Connection db, User user, long hodId) throws Exception {
@@ -3515,13 +3524,13 @@ public final class CampusExam {
 
     static String createV1PrincipalDepartment(Connection db, User user, Form form) throws Exception {
         user.require("PRINCIPAL", "ADMIN");
-        String code = form.need("code").trim().toUpperCase(Locale.ROOT);
+        String code = form.need("code").trim();
         String name = form.need("name").trim();
         check(!code.isBlank(), 400, "Department code is required");
         check(!name.isBlank(), 400, "Department name is required");
-        check(code.matches("^[A-Z0-9_-]{2,20}$"), 400, "Department code must be 2-20 alphanumeric characters");
+        check(code.matches("^[A-Za-z0-9_.-]{2,50}$"), 400, "Department code must be 2-50 characters");
 
-        String existing = one(db, "SELECT id FROM department WHERE UPPER(code) = ?", code);
+        String existing = one(db, "SELECT id FROM department WHERE UPPER(code) = UPPER(?)", code);
         check(existing.isEmpty(), 409, "Department code " + code + " already exists");
 
         long deptId = insert(db, "INSERT INTO department(code, name, status) VALUES (?, ?, 'ACTIVE')", code, name);
@@ -3582,6 +3591,150 @@ public final class CampusExam {
             db.setAutoCommit(origAutoCommit);
         }
         return v1Success(Map.of("id", String.valueOf(deptId), "status", status.equals("ARCHIVED") ? "Archived" : (status.equals("INACTIVE") ? "Inactive" : "Active")), "Department status updated to " + status);
+    }
+
+    static String getV1PrincipalDepartmentWorkspace(Connection db, User user, long deptId, Form form) throws SQLException {
+        user.require("PRINCIPAL", "ADMIN");
+
+        // 1. Department info
+        Map<String, Object> dept = new LinkedHashMap<>();
+        try (var st = sql(db, "SELECT id, code, name, status, created_at FROM department WHERE id = ?", deptId);
+             var rs = st.executeQuery()) {
+            if (!rs.next()) throw new Problem(404, "Department not found");
+            dept.put("id", String.valueOf(rs.getLong(1)));
+            dept.put("code", rs.getString(2));
+            dept.put("name", rs.getString(3));
+            String stStr = rs.getString(4);
+            dept.put("status", "ARCHIVED".equalsIgnoreCase(stStr) ? "Archived" : ("INACTIVE".equalsIgnoreCase(stStr) ? "Inactive" : "Active"));
+            dept.put("identificationNumber", "DEPT-" + rs.getString(2));
+            dept.put("createdAt", rs.getTimestamp(5) != null ? rs.getTimestamp(5).toInstant().toString() : "");
+        }
+
+        // HOD info
+        try (var st = sql(db, "SELECT id, full_name, email, contact_number, employee_id, username, designation, status FROM account WHERE department_id = ? AND role = 'HOD' ORDER BY status ASC, id DESC LIMIT 1", deptId);
+             var rs = st.executeQuery()) {
+            if (rs.next()) {
+                Map<String, Object> hod = new LinkedHashMap<>();
+                hod.put("id", String.valueOf(rs.getLong(1)));
+                hod.put("fullName", rs.getString(2));
+                hod.put("email", rs.getString(3));
+                hod.put("contactNumber", rs.getString(4) != null ? rs.getString(4) : "");
+                hod.put("employeeId", rs.getString(5) != null ? rs.getString(5) : "");
+                hod.put("username", rs.getString(6));
+                hod.put("designation", rs.getString(7) != null ? rs.getString(7) : "Head of Department");
+                hod.put("status", "ACTIVE".equalsIgnoreCase(rs.getString(8)) ? "Active" : "Inactive");
+                dept.put("hod", hod);
+            }
+        }
+
+        int semFilter = 0;
+        if (form != null && !form.get("semester").isBlank()) {
+            try { semFilter = Integer.parseInt(form.get("semester")); } catch (Exception ignored) {}
+        }
+
+        // 2. Subjects for this department
+        List<Map<String, Object>> subjects = new ArrayList<>();
+        String subSql = "SELECT id, code, name, semester, module_count, status FROM subject WHERE department_id = ?"
+                + (semFilter > 0 ? " AND semester = " + semFilter : "")
+                + " ORDER BY semester ASC, code ASC";
+        try (var st = sql(db, subSql, deptId); var rs = st.executeQuery()) {
+            while (rs.next()) {
+                Map<String, Object> s = new LinkedHashMap<>();
+                s.put("id", String.valueOf(rs.getLong(1)));
+                s.put("code", rs.getString(2));
+                s.put("name", rs.getString(3));
+                s.put("semester", rs.getInt(4));
+                s.put("credits", 4);
+                s.put("moduleCount", rs.getInt(5));
+                s.put("status", "ARCHIVED".equalsIgnoreCase(rs.getString(6)) ? "Archived" : "Active");
+                subjects.add(s);
+            }
+        }
+
+        // 3. Students for this department
+        List<Map<String, Object>> students = new ArrayList<>();
+        String studSql = """
+                SELECT sr.id, sr.usn, sr.full_name, lower(sr.usn) || '@mitmysore.in' AS email, ag.semester, ag.section, sr.status
+                FROM student_roster sr
+                JOIN academic_group ag ON ag.id = sr.group_id
+                WHERE ag.department_id = ?
+                """ + (semFilter > 0 ? " AND ag.semester = " + semFilter : "")
+                + " ORDER BY ag.semester ASC, ag.section ASC, sr.usn ASC LIMIT 500";
+        try (var st = sql(db, studSql, deptId); var rs = st.executeQuery()) {
+            while (rs.next()) {
+                Map<String, Object> stMap = new LinkedHashMap<>();
+                stMap.put("id", String.valueOf(rs.getLong(1)));
+                stMap.put("usn", rs.getString(2));
+                stMap.put("fullName", rs.getString(3));
+                stMap.put("email", rs.getString(4));
+                stMap.put("semester", rs.getInt(5));
+                stMap.put("section", rs.getString(6));
+                stMap.put("status", rs.getString(7) != null ? rs.getString(7) : "Active");
+                students.add(stMap);
+            }
+        }
+
+        // 4. Performance & Exam Results
+        List<Map<String, Object>> results = new ArrayList<>();
+        String resSql = """
+                SELECT es.id, s.code, s.name, ag.semester, coalesce(lri.attended, 0), coalesce(lri.absent, 0), coalesce(lri.average_marks, 0.0), coalesce(lri.status, 'Completed')
+                FROM lab_result_import lri
+                JOIN examination_session es ON es.id = lri.session_id
+                JOIN subject s ON s.id = es.subject_id
+                JOIN academic_group ag ON ag.id = es.group_id
+                WHERE ag.department_id = ?
+                """ + (semFilter > 0 ? " AND ag.semester = " + semFilter : "")
+                + " ORDER BY es.id DESC LIMIT 50";
+        try (var st = sql(db, resSql, deptId); var rs = st.executeQuery()) {
+            while (rs.next()) {
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("examinationId", String.valueOf(rs.getLong(1)));
+                r.put("subjectCode", rs.getString(2));
+                r.put("subjectName", rs.getString(3));
+                r.put("semester", rs.getInt(4));
+                r.put("passedCount", rs.getInt(5));
+                r.put("failedCount", rs.getInt(6));
+                r.put("averageScore", rs.getDouble(7));
+                r.put("status", rs.getString(8));
+                results.add(r);
+            }
+        }
+
+        // 5. Department Audit Trail
+        List<Map<String, Object>> auditLogs = new ArrayList<>();
+        String auditSql = """
+                SELECT al.id, al.happened, al.action, al.entity, al.detail,
+                       coalesce(a.full_name, 'System') AS actor_name,
+                       coalesce(a.role, 'SYSTEM') AS actor_role
+                FROM audit al
+                LEFT JOIN account a ON a.id = al.actor
+                WHERE (al.entity LIKE 'department:%' AND al.entity = 'department:' || ?)
+                   OR (a.department_id = ?)
+                ORDER BY al.id DESC LIMIT 50
+                """;
+        try (var st = sql(db, auditSql, deptId, deptId); var rs = st.executeQuery()) {
+            while (rs.next()) {
+                Map<String, Object> l = new LinkedHashMap<>();
+                l.put("id", String.valueOf(rs.getLong(1)));
+                l.put("timestamp", rs.getTimestamp(2) != null ? rs.getTimestamp(2).toInstant().toString() : "");
+                l.put("action", rs.getString(3));
+                l.put("entity", rs.getString(4));
+                l.put("details", rs.getString(5));
+                l.put("actorName", rs.getString(6));
+                l.put("actorRole", rs.getString(7));
+                auditLogs.add(l);
+            }
+        }
+
+        Map<String, Object> workspace = new LinkedHashMap<>();
+        workspace.put("department", dept);
+        workspace.put("selectedSemester", semFilter);
+        workspace.put("availableSemesters", List.of(1, 2, 3, 4, 5, 6, 7, 8));
+        workspace.put("subjects", subjects);
+        workspace.put("students", students);
+        workspace.put("results", results);
+        workspace.put("auditLogs", auditLogs);
+        return v1Success(workspace, "Department workspace data loaded");
     }
 
     static String getV1PrincipalDepartmentHodHistory(Connection db, User user, long deptId) throws SQLException {
@@ -4192,7 +4345,7 @@ public final class CampusExam {
         }
         check(deptId != null, 403, "Authenticated department scope is required");
 
-        String code = form.need("code").trim().toUpperCase(Locale.ROOT);
+        String code = form.need("code").trim();
         String name = form.need("name").trim();
         int sem = form.number("semesterNumber");
         check(sem >= 1 && sem <= 8, 400, "Semester must be between 1 and 8");
@@ -4240,7 +4393,7 @@ public final class CampusExam {
         long deptId = Long.parseLong(deptIdStr);
         int sem = Integer.parseInt(one(db, "SELECT semester FROM subject WHERE id=?", subjectId));
 
-        String code = form.need("code").trim().toUpperCase(Locale.ROOT);
+        String code = form.need("code").trim();
         String name = form.need("name").trim();
         int moduleCount = 5;
         if (!form.get("moduleCount").isBlank()) {
@@ -4356,6 +4509,104 @@ public final class CampusExam {
         UserSession session = user.toSession(db);
         Map<String, Object> res = studentService.removeIndividualStudent(db, session, studentId);
         return Json.stringify(res);
+    }
+
+    static String promoteV1HodStudentsSemester(Connection db, User user, Form form) throws Exception {
+        user.require("HOD");
+        Long deptId = user.departmentId();
+        check(deptId != null, 403, "Department context required");
+
+        int sourceSemester = form.number("sourceSemester");
+        check(sourceSemester >= 1 && sourceSemester <= 7, 400, "Source semester must be between 1 and 7");
+        int targetSemester = form.get("targetSemester").isBlank() ? (sourceSemester + 1) : form.number("targetSemester");
+        check(targetSemester == sourceSemester + 1, 400, "Target semester must be source semester + 1");
+
+        String section = form.need("section").trim().toUpperCase(Locale.ROOT);
+        check(!section.isBlank(), 400, "Section is required");
+
+        boolean origAutoCommit = db.getAutoCommit();
+        db.setAutoCommit(false);
+        try {
+            // Find source group
+            String srcGroupIdStr = one(db, "SELECT id FROM academic_group WHERE department_id = ? AND semester = ? AND upper(section) = ? AND status = 'ACTIVE' ORDER BY id DESC LIMIT 1", deptId, sourceSemester, section);
+            check(!srcGroupIdStr.isEmpty(), 404, "Active class for Semester " + sourceSemester + " Section " + section + " not found");
+            long srcGroupId = Long.parseLong(srcGroupIdStr);
+
+            // Find or create target group
+            String tgtGroupIdStr = one(db, "SELECT id FROM academic_group WHERE department_id = ? AND semester = ? AND upper(section) = ? AND status = 'ACTIVE' ORDER BY id DESC LIMIT 1", deptId, targetSemester, section);
+            long tgtGroupId;
+            if (tgtGroupIdStr.isEmpty()) {
+                tgtGroupId = insert(db, "INSERT INTO academic_group(department_id, semester, section, academic_year, status) VALUES (?, ?, ?, '2026-27', 'ACTIVE')", deptId, targetSemester, section);
+            } else {
+                tgtGroupId = Long.parseLong(tgtGroupIdStr);
+            }
+
+            // Count eligible students
+            int studentCount = Integer.parseInt(one(db, "SELECT count(*) FROM student_roster WHERE group_id = ? AND status = 'ACTIVE'", srcGroupId));
+            check(studentCount > 0, 400, "No active students found in Semester " + sourceSemester + " Section " + section + " to promote");
+
+            // Promote active students to target group
+            run(db, "UPDATE student_roster SET group_id = ?, semester = ?, section = ?, updated_at = clock_timestamp() WHERE group_id = ? AND status = 'ACTIVE'", tgtGroupId, targetSemester, section, srcGroupId);
+
+            audit(db, user.id(), "PROMOTE_STUDENTS", "academic_group:" + tgtGroupId,
+                    "Promoted " + studentCount + " students from Semester " + sourceSemester + " Section " + section + " to Semester " + targetSemester);
+
+            db.commit();
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("promotedCount", studentCount);
+            resp.put("sourceSemester", sourceSemester);
+            resp.put("targetSemester", targetSemester);
+            resp.put("section", section);
+            resp.put("sourceGroupId", String.valueOf(srcGroupId));
+            resp.put("targetGroupId", String.valueOf(tgtGroupId));
+            return v1Success(resp, "Successfully promoted " + studentCount + " students to Semester " + targetSemester);
+        } catch (Exception ex) {
+            db.rollback();
+            throw ex;
+        } finally {
+            db.setAutoCommit(origAutoCommit);
+        }
+    }
+
+    static String graduateV1HodSemester8(Connection db, User user, Form form) throws Exception {
+        user.require("HOD");
+        Long deptId = user.departmentId();
+        check(deptId != null, 403, "Department context required");
+
+        String section = form.need("section").trim().toUpperCase(Locale.ROOT);
+        check(!section.isBlank(), 400, "Section is required");
+
+        boolean origAutoCommit = db.getAutoCommit();
+        db.setAutoCommit(false);
+        try {
+            String srcGroupIdStr = one(db, "SELECT id FROM academic_group WHERE department_id = ? AND semester = 8 AND upper(section) = ? AND status = 'ACTIVE' ORDER BY id DESC LIMIT 1", deptId, section);
+            check(!srcGroupIdStr.isEmpty(), 404, "Active Semester 8 Section " + section + " class not found");
+            long srcGroupId = Long.parseLong(srcGroupIdStr);
+
+            int studentCount = Integer.parseInt(one(db, "SELECT count(*) FROM student_roster WHERE group_id = ? AND status = 'ACTIVE'", srcGroupId));
+
+            // Mark students and group as GRADUATED
+            run(db, "UPDATE student_roster SET status = 'GRADUATED', updated_at = clock_timestamp() WHERE group_id = ? AND status = 'ACTIVE'", srcGroupId);
+            run(db, "UPDATE academic_group SET status = 'GRADUATED' WHERE id = ?", srcGroupId);
+
+            audit(db, user.id(), "GRADUATE_CLASS", "academic_group:" + srcGroupId,
+                    "Graduated Semester 8 Section " + section + " with " + studentCount + " students");
+
+            db.commit();
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("graduatedCount", studentCount);
+            resp.put("semester", 8);
+            resp.put("section", section);
+            resp.put("groupId", String.valueOf(srcGroupId));
+            return v1Success(resp, "Successfully archived and graduated Semester 8 Section " + section + " (" + studentCount + " students)");
+        } catch (Exception ex) {
+            db.rollback();
+            throw ex;
+        } finally {
+            db.setAutoCommit(origAutoCommit);
+        }
     }
 
     static String validateV1HodUsns(Connection db, User user, Form form) throws SQLException {
@@ -5484,6 +5735,15 @@ public final class CampusExam {
 
         byte[] pdfBytes = (byte[]) form.values().get("__file_bytes__");
         String filename = (String) form.values().get("__file_name__");
+        if (pdfBytes != null && pdfBytes.length > 50 * 1024 * 1024) {
+            throw new Problem(400, "Course Outcomes PDF exceeds the 50 MB upload limit.");
+        }
+        if (pdfBytes != null && pdfBytes.length > 4) {
+            String header = new String(Arrays.copyOfRange(pdfBytes, 0, Math.min(pdfBytes.length, 5)), StandardCharsets.ISO_8859_1);
+            if (!header.startsWith("%PDF")) {
+                throw new Problem(400, "Uploaded file is not a valid PDF document. Header must start with %PDF-.");
+            }
+        }
         if (pdfBytes == null || pdfBytes.length == 0) {
             pdfBytes = "%PDF-1.4 Default CO Document".getBytes(StandardCharsets.UTF_8);
             filename = "Course_Outcomes.pdf";
@@ -6798,55 +7058,612 @@ public final class CampusExam {
         return v1Success(fetchCoeExaminationDto(db, examId), "Examiners saved successfully");
     }
 
-    static byte[] generateQuestionPaperPdf(String title, String subCode, String subName, int setNum, List<Map<String, Object>> questions) {
-        StringBuilder textStream = new StringBuilder();
-        textStream.append("BT\n");
-        textStream.append("/F1 16 Tf\n");
-        textStream.append("50 780 Td\n");
-        textStream.append("(Maharaja Institute of Technology Mysore) Tj\n");
-        textStream.append("0 -24 Td\n");
-        textStream.append("/F1 12 Tf\n");
-        textStream.append("(").append(sanitizePdfText("Autonomous Examination Management System")).append(") Tj\n");
-        textStream.append("0 -20 Td\n");
-        textStream.append("/F1 14 Tf\n");
-        textStream.append("(").append(sanitizePdfText("Question Paper - Set " + setNum + " : " + subCode + " (" + subName + ")")).append(") Tj\n");
-        textStream.append("0 -25 Td\n");
-        textStream.append("/F1 10 Tf\n");
-        textStream.append("(").append(sanitizePdfText("Maximum Marks: 30  |  Duration: 60 Minutes  |  Strictly Confidential Examination Archive")).append(") Tj\n");
-        textStream.append("0 -25 Td\n");
+    static Map<String, Object> fetchArchiveData(Connection db, long eid, String sitName) throws SQLException {
+        if (sitName.endsWith("-M") || sitName.contains("MORN")) sitName = "MORNING";
+        else if (sitName.endsWith("-A") || sitName.contains("AFT")) sitName = "AFTERNOON";
 
-        int qIdx = 1;
-        for (Map<String, Object> q : questions) {
-            String prompt = String.valueOf(q.getOrDefault("prompt", "Question " + qIdx));
-            String optA = String.valueOf(q.getOrDefault("optionA", "Option A"));
-            String optB = String.valueOf(q.getOrDefault("optionB", "Option B"));
-            String optC = String.valueOf(q.getOrDefault("optionC", "Option C"));
-            String optD = String.valueOf(q.getOrDefault("optionD", "Option D"));
-            int mod = q.get("moduleNumber") instanceof Number n ? n.intValue() : 1;
+        String subCode = "CS301";
+        String subName = "Examination Paper";
+        String deptCode = "CSE";
+        String deptName = "Computer Science and Engineering";
+        int sem = 5;
+        String acadSession = "2025-2026";
+        String examDate = "";
+        String dur = "60";
+        String marks = "30";
+        String passingMarks = "12";
+        String assignedLab = "LAB-CSE-01";
+        String sessStatus = "COMPLETED";
+        int setNum = 1;
+        String paperTitle = "Paper Set 1";
+        int revNum = 1;
+        long selPaperId = 0L;
 
-            textStream.append("/F1 11 Tf\n");
-            textStream.append("(").append(sanitizePdfText("Q" + qIdx + ". [Module " + mod + "] " + prompt)).append(") Tj\n");
-            textStream.append("0 -16 Td\n");
-            textStream.append("/F1 10 Tf\n");
-            textStream.append("(").append(sanitizePdfText("    A) " + optA + "    B) " + optB)).append(") Tj\n");
-            textStream.append("0 -14 Td\n");
-            textStream.append("(").append(sanitizePdfText("    C) " + optC + "    D) " + optD)).append(") Tj\n");
-            textStream.append("0 -20 Td\n");
-            qIdx++;
+        try (var st = sql(db, """
+                SELECT esit.selected_paper_id, coalesce(gp.paper_number, 1), coalesce(gp.title, 'Paper Set ' || coalesce(gp.paper_number, 1)),
+                       s.code, s.name, coalesce(d.code, 'CSE'), coalesce(d.name, 'Computer Science and Engineering'),
+                       coalesce(s.semester, 5), '2025-2026',
+                       coalesce(es.session_date::text, ''), coalesce(es.duration_minutes::text, '60'),
+                       coalesce(es.total_marks::text, '30'), coalesce(es.passing_marks::text, '12'),
+                       coalesce(es.assigned_lab, 'LAB-CSE-01'), es.status, coalesce(qb.revision_number, 1),
+                       es.selected_paper_id
+                FROM examination_sitting esit
+                JOIN examination_session es ON es.id = esit.session_id
+                JOIN subject s ON s.id = es.subject_id
+                LEFT JOIN department d ON d.id = coalesce(es.department_id, s.department_id)
+                LEFT JOIN generated_paper gp ON gp.id = coalesce(esit.selected_paper_id, es.selected_paper_id)
+                LEFT JOIN question_bank qb ON qb.id = gp.bank_id
+                WHERE esit.session_id = ? AND esit.sitting_name = ?
+                """, eid, sitName); var rs = st.executeQuery()) {
+            if (rs.next()) {
+                selPaperId = rs.getObject(1) == null ? (rs.getObject(17) == null ? 0L : rs.getLong(17)) : rs.getLong(1);
+                setNum = rs.getInt(2);
+                paperTitle = rs.getString(3);
+                subCode = rs.getString(4);
+                subName = rs.getString(5);
+                deptCode = rs.getString(6);
+                deptName = rs.getString(7);
+                sem = rs.getInt(8);
+                acadSession = rs.getString(9);
+                examDate = rs.getString(10);
+                dur = rs.getString(11);
+                marks = rs.getString(12);
+                passingMarks = rs.getString(13);
+                assignedLab = rs.getString(14);
+                sessStatus = rs.getString(15);
+                revNum = rs.getInt(16);
+            }
         }
-        textStream.append("ET\n");
+        if (selPaperId == 0L) {
+            try {
+                String sStr = one(db, "SELECT coalesce(selected_paper_id, 0) FROM examination_session WHERE id=?", eid);
+                if (!sStr.isBlank()) selPaperId = Long.parseLong(sStr);
+            } catch (Exception ignored) {}
+        }
 
-        byte[] streamBytes = textStream.toString().getBytes(StandardCharsets.US_ASCII);
-        String pdf = "%PDF-1.4\n" +
-                "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n" +
-                "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n" +
-                "3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /MediaBox [0 0 595 842] /Contents 5 0 R >>\nendobj\n" +
-                "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n" +
-                "5 0 obj\n<< /Length " + streamBytes.length + " >>\nstream\n" +
-                new String(streamBytes, StandardCharsets.US_ASCII) + "\nendstream\nendobj\n" +
-                "xref\n0 6\n0000000000 65535 f \n" +
-                "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n0\n%%EOF\n";
-        return pdf.getBytes(StandardCharsets.UTF_8);
+        List<Map<String, Object>> questions = new ArrayList<>();
+        List<Map<String, Object>> answerKey = new ArrayList<>();
+        if (selPaperId > 0) {
+            try (var st = sql(db, """
+                    SELECT gpq.paper_position, coalesce(qbi.question_uid, 'Q' || gpq.paper_position),
+                           qbi.module_number, qbi.prompt, qbi.options, qbi.correct, coalesce(qbi.marks, 1.0),
+                           coalesce(qbi.explanation, '')
+                    FROM generated_paper_question gpq
+                    JOIN question_bank_item qbi ON qbi.id = gpq.question_id
+                    WHERE gpq.paper_id = ?
+                    ORDER BY gpq.paper_position ASC
+                    """, selPaperId); var rs = st.executeQuery()) {
+                int seq = 1;
+                while (rs.next()) {
+                    int pos = rs.getInt(1);
+                    String qUid = rs.getString(2);
+                    int mod = rs.getInt(3);
+                    String prompt = rs.getString(4);
+                    java.sql.Array arr = rs.getArray(5);
+                    String[] opts = arr != null ? (String[]) arr.getArray() : new String[0];
+                    int correctInt = rs.getInt(6);
+                    double qMarks = rs.getDouble(7);
+                    String explanation = rs.getString(8);
+
+                    String optA = opts.length > 0 ? opts[0] : "";
+                    String optB = opts.length > 1 ? opts[1] : "";
+                    String optC = opts.length > 2 ? opts[2] : "";
+                    String optD = opts.length > 3 ? opts[3] : "";
+
+                    String correctLetter = switch (correctInt) {
+                        case 1 -> "A";
+                        case 2 -> "B";
+                        case 3 -> "C";
+                        case 4 -> "D";
+                        default -> "A";
+                    };
+                    String correctText = (correctInt >= 1 && correctInt <= opts.length) ? opts[correctInt - 1] : optA;
+
+                    Map<String, Object> q = new LinkedHashMap<>();
+                    q.put("serialNumber", seq);
+                    q.put("moduleNumber", mod);
+                    q.put("originalQuestionNumber", qUid);
+                    q.put("prompt", prompt);
+                    q.put("optionA", optA);
+                    q.put("optionB", optB);
+                    q.put("optionC", optC);
+                    q.put("optionD", optD);
+                    q.put("correctAnswer", correctLetter);
+                    q.put("correctAnswerText", correctText);
+                    q.put("marks", qMarks > 0 ? qMarks : 1.0);
+                    q.put("questionType", "Multiple Choice (MCQ)");
+                    q.put("explanation", explanation);
+                    questions.add(q);
+
+                    Map<String, Object> ak = new LinkedHashMap<>();
+                    ak.put("questionNumber", seq);
+                    ak.put("moduleNumber", mod);
+                    ak.put("correctOption", correctLetter);
+                    ak.put("correctAnswerText", correctText);
+                    ak.put("marks", qMarks > 0 ? qMarks : 1.0);
+                    answerKey.add(ak);
+
+                    seq++;
+                }
+            }
+        }
+
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("institutionName", "Maharaja Institute of Technology Mysore");
+        meta.put("portalName", "Autonomous Examination Management System");
+        meta.put("documentType", "Archived Question Set & Confidential Answer Key");
+        meta.put("examinationId", String.valueOf(eid));
+        meta.put("examCode", "EXAM-" + subCode + "-" + eid);
+        meta.put("examinationName", subName);
+        meta.put("subjectCode", subCode);
+        meta.put("subjectName", subName);
+        meta.put("departmentCode", deptCode);
+        meta.put("departmentName", deptName);
+        meta.put("semester", String.valueOf(sem));
+        meta.put("academicSession", acadSession);
+        meta.put("examDate", examDate);
+        meta.put("sittingName", "MORNING".equalsIgnoreCase(sitName) ? "Morning Sitting" : "Afternoon Sitting");
+        meta.put("rawSittingName", sitName);
+        meta.put("paperSetNumber", setNum);
+        meta.put("paperTitle", paperTitle);
+        meta.put("questionSetRevision", "R" + revNum);
+        meta.put("durationMinutes", dur);
+        meta.put("totalMarks", marks);
+        meta.put("passingMarks", passingMarks);
+        meta.put("assignedLab", assignedLab);
+        meta.put("totalQuestions", questions.size());
+        meta.put("status", sessStatus);
+        meta.put("archiveGeneratedAt", Instant.now().toString());
+        meta.put("confidentialityNotice", "STRICTLY CONFIDENTIAL — FOR CONTROLLER OF EXAMINATIONS (COE) / ADMIN USE ONLY");
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("metadata", meta);
+        result.put("questions", questions);
+        result.put("answerKey", answerKey);
+        return result;
+    }
+
+    static String getV1CoeQuestionPaperArchiveData(Connection db, User user, long eid, String sitName) throws Exception {
+        user.require("COE", "ADMIN");
+        Map<String, Object> archiveData = fetchArchiveData(db, eid, sitName);
+        return v1Success(archiveData, "Question paper archive data loaded");
+    }
+
+    static byte[] generateQuestionPaperPdf(Map<String, Object> meta, List<Map<String, Object>> questions) throws IOException {
+        String inst = String.valueOf(meta.getOrDefault("institutionName", "Maharaja Institute of Technology Mysore"));
+        String subCode = String.valueOf(meta.getOrDefault("subjectCode", "CS301"));
+        String subName = String.valueOf(meta.getOrDefault("subjectName", "Examination"));
+        int setNum = meta.get("paperSetNumber") instanceof Number n ? n.intValue() : 1;
+        String dur = String.valueOf(meta.getOrDefault("durationMinutes", "60"));
+        String marks = String.valueOf(meta.getOrDefault("totalMarks", "30"));
+        String date = String.valueOf(meta.getOrDefault("examDate", ""));
+        String sitting = String.valueOf(meta.getOrDefault("sittingName", "Morning Sitting"));
+
+        List<List<Map<String, Object>>> questionPages = new ArrayList<>();
+        int qIdx = 0;
+        int totalQ = questions.size();
+        int pageNum = 1;
+        while (qIdx < totalQ) {
+            int pageSize = (pageNum == 1) ? 6 : 8;
+            int end = Math.min(qIdx + pageSize, totalQ);
+            questionPages.add(new ArrayList<>(questions.subList(qIdx, end)));
+            qIdx = end;
+            pageNum++;
+        }
+        if (questionPages.isEmpty()) {
+            questionPages.add(new ArrayList<>());
+        }
+
+        int totalPages = questionPages.size() + 1; // +1 for Confidential Answer Key page
+        List<byte[]> streams = new ArrayList<>();
+
+        int currentQNum = 1;
+        for (int p = 0; p < questionPages.size(); p++) {
+            List<Map<String, Object>> pageQuestions = questionPages.get(p);
+            StringBuilder sb = new StringBuilder();
+            sb.append("BT\n");
+
+            if (p == 0) {
+                sb.append("/F2 15 Tf\n");
+                sb.append("50 790 Td\n");
+                sb.append("(").append(sanitizePdfText(inst)).append(") Tj\n");
+                sb.append("0 -20 Td\n");
+                sb.append("/F1 11 Tf\n");
+                sb.append("(Autonomous Examination Management System - COE Official Archive) Tj\n");
+                sb.append("0 -18 Td\n");
+                sb.append("/F2 13 Tf\n");
+                sb.append("(").append(sanitizePdfText("Question Paper - Set " + setNum + " : " + subCode + " - " + subName)).append(") Tj\n");
+                sb.append("0 -18 Td\n");
+                sb.append("/F1 10 Tf\n");
+                sb.append("(").append(sanitizePdfText("Date: " + date + "  |  Sitting: " + sitting + "  |  Duration: " + dur + " Mins  |  Max Marks: " + marks)).append(") Tj\n");
+                sb.append("0 -22 Td\n");
+            } else {
+                sb.append("/F2 11 Tf\n");
+                sb.append("50 800 Td\n");
+                sb.append("(").append(sanitizePdfText(inst + "  |  " + subCode + " (Set " + setNum + ")")).append(") Tj\n");
+                sb.append("0 -15 Td\n");
+                sb.append("/F1 9 Tf\n");
+                sb.append("(Archived Question Paper - Strictly Confidential) Tj\n");
+                sb.append("0 -20 Td\n");
+            }
+
+            for (Map<String, Object> q : pageQuestions) {
+                int mod = q.get("moduleNumber") instanceof Number n ? n.intValue() : 1;
+                String prompt = String.valueOf(q.getOrDefault("prompt", ""));
+                String optA = String.valueOf(q.getOrDefault("optionA", ""));
+                String optB = String.valueOf(q.getOrDefault("optionB", ""));
+                String optC = String.valueOf(q.getOrDefault("optionC", ""));
+                String optD = String.valueOf(q.getOrDefault("optionD", ""));
+
+                sb.append("/F2 10 Tf\n");
+                sb.append("(").append(sanitizePdfText("Q" + currentQNum + ". [Module " + mod + "] " + prompt)).append(") Tj\n");
+                sb.append("0 -14 Td\n");
+                sb.append("/F1 9 Tf\n");
+                sb.append("(").append(sanitizePdfText("    A) " + optA + "    B) " + optB)).append(") Tj\n");
+                sb.append("0 -13 Td\n");
+                sb.append("(").append(sanitizePdfText("    C) " + optC + "    D) " + optD)).append(") Tj\n");
+                sb.append("0 -18 Td\n");
+                currentQNum++;
+            }
+
+            sb.append("ET\n");
+            sb.append("BT\n");
+            sb.append("/F1 9 Tf\n");
+            sb.append("50 35 Td\n");
+            sb.append("(").append(sanitizePdfText("Page " + (p + 1) + " of " + totalPages + "  |  Maharaja Institute of Technology Mysore Examination Management System")).append(") Tj\n");
+            sb.append("ET\n");
+
+            streams.add(sb.toString().getBytes(StandardCharsets.US_ASCII));
+        }
+
+        // Answer Key Page (Last Page)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.append("BT\n");
+            sb.append("/F2 14 Tf\n");
+            sb.append("50 790 Td\n");
+            sb.append("(").append(sanitizePdfText(inst)).append(") Tj\n");
+            sb.append("0 -20 Td\n");
+            sb.append("/F2 12 Tf\n");
+            sb.append("(").append(sanitizePdfText("OFFICIAL ANSWER KEY & EVALUATION SCHEME - SET " + setNum)).append(") Tj\n");
+            sb.append("0 -16 Td\n");
+            sb.append("/F1 10 Tf\n");
+            sb.append("(").append(sanitizePdfText("Subject: " + subCode + " - " + subName + "  |  Total Questions: " + questions.size() + "  |  Max Marks: " + marks)).append(") Tj\n");
+            sb.append("0 -16 Td\n");
+            sb.append("/F2 9 Tf\n");
+            sb.append("(CONFIDENTIAL - AUTHORIZED CONTROLLER OF EXAMINATIONS (COE) / ADMIN ACCESS ONLY) Tj\n");
+            sb.append("0 -25 Td\n");
+
+            sb.append("/F2 10 Tf\n");
+            sb.append("(Q#    Mod   Key   Correct Answer Text                                              Marks) Tj\n");
+            sb.append("0 -14 Td\n");
+            sb.append("/F1 9 Tf\n");
+
+            int akIdx = 1;
+            for (Map<String, Object> q : questions) {
+                int mod = q.get("moduleNumber") instanceof Number n ? n.intValue() : 1;
+                String ans = String.valueOf(q.getOrDefault("correctAnswer", ""));
+                String ansText = String.valueOf(q.getOrDefault("correctAnswerText", ""));
+                if (ansText.length() > 42) ansText = ansText.substring(0, 39) + "...";
+                String mks = String.valueOf(q.getOrDefault("marks", "1.0"));
+
+                String line = String.format("%-6s %-5s %-5s %-50s %s", "Q" + akIdx, "M" + mod, ans, ansText, mks);
+                sb.append("(").append(sanitizePdfText(line)).append(") Tj\n");
+                sb.append("0 -14 Td\n");
+                akIdx++;
+                if (akIdx == 38) {
+                    sb.append("0 -10 Td\n");
+                }
+            }
+
+            sb.append("ET\n");
+            sb.append("BT\n");
+            sb.append("/F1 9 Tf\n");
+            sb.append("50 35 Td\n");
+            sb.append("(").append(sanitizePdfText("Page " + totalPages + " of " + totalPages + " (Answer Key)  |  COE Strictly Confidential")).append(") Tj\n");
+            sb.append("ET\n");
+
+            streams.add(sb.toString().getBytes(StandardCharsets.US_ASCII));
+        }
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        List<Integer> offsets = new ArrayList<>();
+        offsets.add(0);
+
+        baos.write("%PDF-1.4\n".getBytes(StandardCharsets.US_ASCII));
+
+        offsets.add(baos.size());
+        baos.write("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".getBytes(StandardCharsets.US_ASCII));
+
+        StringBuilder kids = new StringBuilder();
+        for (int p = 0; p < totalPages; p++) {
+            kids.append((10 + p * 2)).append(" 0 R ");
+        }
+
+        offsets.add(baos.size());
+        baos.write(("2 0 obj\n<< /Type /Pages /Kids [" + kids.toString().trim() + "] /Count " + totalPages + " >>\nendobj\n").getBytes(StandardCharsets.US_ASCII));
+
+        offsets.add(baos.size());
+        baos.write("3 0 obj\n<< >>\nendobj\n".getBytes(StandardCharsets.US_ASCII));
+
+        offsets.add(baos.size());
+        baos.write("4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".getBytes(StandardCharsets.US_ASCII));
+
+        offsets.add(baos.size());
+        baos.write("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n".getBytes(StandardCharsets.US_ASCII));
+
+        for (int i = 6; i <= 9; i++) {
+            offsets.add(baos.size());
+            baos.write((i + " 0 obj\n<< >>\nendobj\n").getBytes(StandardCharsets.US_ASCII));
+        }
+
+        for (int p = 0; p < totalPages; p++) {
+            int pageObj = 10 + p * 2;
+            int streamObj = 11 + p * 2;
+            byte[] streamBytes = streams.get(p);
+
+            while (offsets.size() < pageObj) offsets.add(baos.size());
+            offsets.add(baos.size());
+            baos.write((pageObj + " 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /MediaBox [0 0 595 842] /Contents " + streamObj + " 0 R >>\nendobj\n").getBytes(StandardCharsets.US_ASCII));
+
+            offsets.add(baos.size());
+            baos.write((streamObj + " 0 obj\n<< /Length " + streamBytes.length + " >>\nstream\n").getBytes(StandardCharsets.US_ASCII));
+            baos.write(streamBytes);
+            baos.write("\nendstream\nendobj\n".getBytes(StandardCharsets.US_ASCII));
+        }
+
+        int startXref = baos.size();
+        int totalObjs = 10 + totalPages * 2;
+        baos.write(("xref\n0 " + totalObjs + "\n0000000000 65535 f \n").getBytes(StandardCharsets.US_ASCII));
+        for (int i = 1; i < totalObjs; i++) {
+            int off = (i < offsets.size()) ? offsets.get(i) : 0;
+            baos.write(String.format("%010d 00000 n \n", off).getBytes(StandardCharsets.US_ASCII));
+        }
+
+        baos.write(("trailer\n<< /Size " + totalObjs + " /Root 1 0 R >>\nstartxref\n" + startXref + "\n%%EOF\n").getBytes(StandardCharsets.US_ASCII));
+        return baos.toByteArray();
+    }
+
+    static byte[] buildQuestionPaperXlsxBytes(Map<String, Object> meta, List<Map<String, Object>> questions) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            addZipEntry(zos, "[Content_Types].xml", """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+                  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+                  <Default Extension="xml" ContentType="application/xml"/>
+                  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+                  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+                  <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+                  <Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+                  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+                </Types>
+                """.stripIndent());
+
+            addZipEntry(zos, "_rels/.rels", """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+                </Relationships>
+                """.stripIndent());
+
+            addZipEntry(zos, "xl/_rels/workbook.xml.rels", """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+                  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+                  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>
+                  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+                </Relationships>
+                """.stripIndent());
+
+            addZipEntry(zos, "xl/workbook.xml", """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                  <sheets>
+                    <sheet name="EXAMINATION INFORMATION" sheetId="1" r:id="rId1"/>
+                    <sheet name="COMPLETE QUESTION SET" sheetId="2" r:id="rId2"/>
+                    <sheet name="ANSWER KEY" sheetId="3" r:id="rId3"/>
+                  </sheets>
+                </workbook>
+                """.stripIndent());
+
+            addZipEntry(zos, "xl/styles.xml", """
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                  <fonts count="4">
+                    <font><sz val="11"/><name val="Calibri"/></font>
+                    <font><b/><sz val="11"/><name val="Calibri"/><color rgb="FF1F2937"/></font>
+                    <font><b/><sz val="14"/><name val="Calibri"/><color rgb="FF1E3A8A"/></font>
+                    <font><b/><sz val="11"/><name val="Calibri"/><color rgb="FFFFFFFF"/></font>
+                  </fonts>
+                  <fills count="4">
+                    <fill><patternFill patternType="none"/></fill>
+                    <fill><patternFill patternType="gray125"/></fill>
+                    <fill><patternFill patternType="solid"><fgColor rgb="FF2563EB"/></patternFill></fill>
+                    <fill><patternFill patternType="solid"><fgColor rgb="FFF1F5F9"/></patternFill></fill>
+                  </fills>
+                  <borders count="2">
+                    <border><left/><right/><top/><bottom/></border>
+                    <border>
+                      <left style="thin"><color rgb="FFCBD5E1"/></left>
+                      <right style="thin"><color rgb="FFCBD5E1"/></right>
+                      <top style="thin"><color rgb="FFCBD5E1"/></top>
+                      <bottom style="thin"><color rgb="FFCBD5E1"/></bottom>
+                    </border>
+                  </borders>
+                  <cellStyleXfs count="1">
+                    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+                  </cellStyleXfs>
+                  <cellXfs count="5">
+                    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>
+                    <xf numFmtId="0" fontId="3" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+                    <xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>
+                    <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+                    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>
+                  </cellXfs>
+                </styleSheet>
+                """.stripIndent());
+
+            // Sheet 1: Examination Information
+            StringBuilder s1 = new StringBuilder();
+            s1.append("""
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                  <cols>
+                    <col min="1" max="1" width="30" customWidth="1"/>
+                    <col min="2" max="2" width="60" customWidth="1"/>
+                  </cols>
+                  <sheetData>
+                """);
+            appendXlsxRow(s1, 1, 3, "MAHARAJA INSTITUTE OF TECHNOLOGY MYSORE", "");
+            appendXlsxRow(s1, 2, 0, "Autonomous Examination Management System — COE Official Question Archive", "");
+            appendXlsxRow(s1, 3, 0, "", "");
+            appendXlsxRow(s1, 4, 1, "ARCHIVE METADATA PROPERTY", "OFFICIAL RECORD VALUE");
+            int r1 = 5;
+            for (Map.Entry<String, Object> e : meta.entrySet()) {
+                appendXlsxRow(s1, r1++, 2, e.getKey(), String.valueOf(e.getValue()));
+            }
+            s1.append("</sheetData></worksheet>");
+            addZipEntry(zos, "xl/worksheets/sheet1.xml", s1.toString());
+
+            // Sheet 2: Complete Question Set
+            StringBuilder s2 = new StringBuilder();
+            s2.append("""
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                  <sheetViews>
+                    <sheetView tabSelected="1" workbookViewId="0">
+                      <pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>
+                    </sheetView>
+                  </sheetViews>
+                  <cols>
+                    <col min="1" max="1" width="10" customWidth="1"/>
+                    <col min="2" max="2" width="12" customWidth="1"/>
+                    <col min="3" max="3" width="14" customWidth="1"/>
+                    <col min="4" max="4" width="45" customWidth="1"/>
+                    <col min="5" max="8" width="28" customWidth="1"/>
+                    <col min="9" max="9" width="16" customWidth="1"/>
+                    <col min="10" max="10" width="30" customWidth="1"/>
+                    <col min="11" max="11" width="10" customWidth="1"/>
+                    <col min="12" max="12" width="22" customWidth="1"/>
+                  </cols>
+                  <sheetData>
+                """);
+            s2.append("<row r=\"1\">");
+            appendXlsxCell(s2, "A1", 1, "Serial Number");
+            appendXlsxCell(s2, "B1", 1, "Module");
+            appendXlsxCell(s2, "C1", 1, "Original Question Number");
+            appendXlsxCell(s2, "D1", 1, "Question");
+            appendXlsxCell(s2, "E1", 1, "Option A");
+            appendXlsxCell(s2, "F1", 1, "Option B");
+            appendXlsxCell(s2, "G1", 1, "Option C");
+            appendXlsxCell(s2, "H1", 1, "Option D");
+            appendXlsxCell(s2, "I1", 1, "Correct Answer");
+            appendXlsxCell(s2, "J1", 1, "Correct Answer Text");
+            appendXlsxCell(s2, "K1", 1, "Marks");
+            appendXlsxCell(s2, "L1", 1, "Question Type");
+            s2.append("</row>");
+
+            int rowIdx = 2;
+            for (Map<String, Object> q : questions) {
+                s2.append("<row r=\"").append(rowIdx).append("\">");
+                appendXlsxCell(s2, "A" + rowIdx, 4, String.valueOf(q.get("serialNumber")));
+                appendXlsxCell(s2, "B" + rowIdx, 4, String.valueOf(q.get("moduleNumber")));
+                appendXlsxCell(s2, "C" + rowIdx, 4, String.valueOf(q.get("originalQuestionNumber")));
+                appendXlsxCell(s2, "D" + rowIdx, 4, String.valueOf(q.get("prompt")));
+                appendXlsxCell(s2, "E" + rowIdx, 4, String.valueOf(q.get("optionA")));
+                appendXlsxCell(s2, "F" + rowIdx, 4, String.valueOf(q.get("optionB")));
+                appendXlsxCell(s2, "G" + rowIdx, 4, String.valueOf(q.get("optionC")));
+                appendXlsxCell(s2, "H" + rowIdx, 4, String.valueOf(q.get("optionD")));
+                appendXlsxCell(s2, "I" + rowIdx, 4, String.valueOf(q.get("correctAnswer")));
+                appendXlsxCell(s2, "J" + rowIdx, 4, String.valueOf(q.get("correctAnswerText")));
+                appendXlsxCell(s2, "K" + rowIdx, 4, String.valueOf(q.get("marks")));
+                appendXlsxCell(s2, "L" + rowIdx, 4, String.valueOf(q.get("questionType")));
+                s2.append("</row>");
+                rowIdx++;
+            }
+            s2.append("</sheetData><autoFilter ref=\"A1:L").append(rowIdx - 1).append("\"/></worksheet>");
+            addZipEntry(zos, "xl/worksheets/sheet2.xml", s2.toString());
+
+            // Sheet 3: Answer Key
+            StringBuilder s3 = new StringBuilder();
+            s3.append("""
+                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+                <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                  <sheetViews>
+                    <sheetView tabSelected="0" workbookViewId="0">
+                      <pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>
+                    </sheetView>
+                  </sheetViews>
+                  <cols>
+                    <col min="1" max="1" width="16" customWidth="1"/>
+                    <col min="2" max="2" width="12" customWidth="1"/>
+                    <col min="3" max="3" width="16" customWidth="1"/>
+                    <col min="4" max="4" width="35" customWidth="1"/>
+                    <col min="5" max="5" width="12" customWidth="1"/>
+                  </cols>
+                  <sheetData>
+                """);
+            s3.append("<row r=\"1\">");
+            appendXlsxCell(s3, "A1", 1, "Question Number");
+            appendXlsxCell(s3, "B1", 1, "Module");
+            appendXlsxCell(s3, "C1", 1, "Correct Option");
+            appendXlsxCell(s3, "D1", 1, "Correct Answer Text");
+            appendXlsxCell(s3, "E1", 1, "Marks");
+            s3.append("</row>");
+
+            int r3 = 2;
+            for (Map<String, Object> q : questions) {
+                s3.append("<row r=\"").append(r3).append("\">");
+                appendXlsxCell(s3, "A" + r3, 4, String.valueOf(q.get("serialNumber")));
+                appendXlsxCell(s3, "B" + r3, 4, String.valueOf(q.get("moduleNumber")));
+                appendXlsxCell(s3, "C" + r3, 4, String.valueOf(q.get("correctAnswer")));
+                appendXlsxCell(s3, "D" + r3, 4, String.valueOf(q.get("correctAnswerText")));
+                appendXlsxCell(s3, "E" + r3, 4, String.valueOf(q.get("marks")));
+                s3.append("</row>");
+                r3++;
+            }
+            s3.append("</sheetData><autoFilter ref=\"A1:E").append(r3 - 1).append("\"/></worksheet>");
+            addZipEntry(zos, "xl/worksheets/sheet3.xml", s3.toString());
+        }
+        return baos.toByteArray();
+    }
+
+    private static void appendXlsxRow(StringBuilder sb, int row, int styleId, String c1, String c2) {
+        sb.append("<row r=\"").append(row).append("\">");
+        appendXlsxCell(sb, "A" + row, styleId, c1);
+        appendXlsxCell(sb, "B" + row, styleId, c2);
+        sb.append("</row>");
+    }
+
+    private static void appendXlsxCell(StringBuilder sb, String ref, int styleId, String val) {
+        sb.append("<c r=\"").append(ref).append("\"");
+        if (styleId > 0) sb.append(" s=\"").append(styleId).append("\"");
+        sb.append(" t=\"inlineStr\"><is><t>");
+        if (val != null) {
+            for (int i = 0; i < val.length(); i++) {
+                char c = val.charAt(i);
+                switch (c) {
+                    case '&' -> sb.append("&amp;");
+                    case '<' -> sb.append("&lt;");
+                    case '>' -> sb.append("&gt;");
+                    case '"' -> sb.append("&quot;");
+                    case '\'' -> sb.append("&apos;");
+                    default -> {
+                        if (c >= 0x20 || c == '\t' || c == '\n' || c == '\r') sb.append(c);
+                    }
+                }
+            }
+        }
+        sb.append("</t></is></c>");
+    }
+
+    private static void addZipEntry(ZipOutputStream zos, String name, String content) throws IOException {
+        ZipEntry ze = new ZipEntry(name);
+        zos.putNextEntry(ze);
+        zos.write(content.getBytes(StandardCharsets.UTF_8));
+        zos.closeEntry();
     }
 
     static String sanitizePdfText(String text) {
@@ -7516,16 +8333,17 @@ public final class CampusExam {
     }
 
     static String getV1CoeQuestionPaperArchive(Connection db, User user, long eid) throws SQLException {
+        user.require("COE", "ADMIN");
         List<Map<String, Object>> list = new ArrayList<>();
         try (var st = sql(db, """
-                SELECT esit.id, esit.sitting_name, esit.selected_paper_id, esit.status,
+                SELECT esit.id, esit.sitting_name, coalesce(esit.selected_paper_id, es.selected_paper_id, 0), esit.status,
                        coalesce(gp.paper_number, 1), coalesce(gp.title, 'Paper Set ' || coalesce(gp.paper_number, 1)),
                        s.code, s.name, es.status AS session_status,
-                       (SELECT count(*) FROM generated_paper_question gpq WHERE gpq.paper_id = esit.selected_paper_id) AS q_count
+                       (SELECT count(*) FROM generated_paper_question gpq WHERE gpq.paper_id = coalesce(esit.selected_paper_id, es.selected_paper_id)) AS q_count
                 FROM examination_sitting esit
                 JOIN examination_session es ON es.id = esit.session_id
                 JOIN subject s ON s.id = es.subject_id
-                LEFT JOIN generated_paper gp ON gp.id = esit.selected_paper_id
+                LEFT JOIN generated_paper gp ON gp.id = coalesce(esit.selected_paper_id, es.selected_paper_id)
                 WHERE esit.session_id = ?
                 ORDER BY CASE WHEN esit.sitting_name = 'MORNING' THEN 0 ELSE 1 END
                 """, eid); var rs = st.executeQuery()) {
@@ -7538,7 +8356,6 @@ public final class CampusExam {
                 String subName = rs.getString(8);
                 String sessStatus = rs.getString(9);
                 int qCount = rs.getInt(10);
-                if (qCount == 0) qCount = 4;
 
                 boolean isAvailable = "COMPLETED".equalsIgnoreCase(sitStatus) ||
                                       "RELEASED".equalsIgnoreCase(sessStatus) ||
@@ -7551,14 +8368,18 @@ public final class CampusExam {
                 arch.put("examinationId", String.valueOf(eid));
                 arch.put("examCode", "EXAM-" + subCode + "-" + eid);
                 arch.put("examinationName", subName);
+                arch.put("subjectCode", subCode);
                 arch.put("sittingId", "SIT-" + eid + "-" + sitCode);
                 arch.put("sittingName", "MORNING".equalsIgnoreCase(sitName) ? "Morning Sitting" : "Afternoon Sitting");
+                arch.put("rawSittingName", sitName);
                 arch.put("status", isAvailable ? "Available" : "Restricted (Sitting In Progress or Pending Completion)");
                 arch.put("originalPaperSetNumber", setNum);
                 arch.put("originalPaperTitle", paperTitle);
                 arch.put("questionCount", qCount);
                 arch.put("downloadUrl", "/api/v1/examinations/" + eid + "/sittings/" + sitName + "/question-paper-archive/download");
-                arch.put("restrictedAnswerKeyAvailable", false);
+                arch.put("excelDownloadUrl", "/api/v1/examinations/" + eid + "/sittings/" + sitName + "/question-paper-archive/download-excel");
+                arch.put("dataUrl", "/api/v1/examinations/" + eid + "/sittings/" + sitName + "/question-paper-archive/data");
+                arch.put("restrictedAnswerKeyAvailable", true);
                 list.add(arch);
             }
         }
@@ -7568,14 +8389,18 @@ public final class CampusExam {
             arch.put("examinationId", String.valueOf(eid));
             arch.put("examCode", "EXAM-" + eid);
             arch.put("examinationName", "Semester Examination");
+            arch.put("subjectCode", "CS301");
             arch.put("sittingId", "SIT-" + eid + "-M");
             arch.put("sittingName", "Morning Sitting");
+            arch.put("rawSittingName", "MORNING");
             arch.put("status", "Available");
             arch.put("originalPaperSetNumber", 1);
             arch.put("originalPaperTitle", "Paper Set 1");
             arch.put("questionCount", 4);
             arch.put("downloadUrl", "/api/v1/examinations/" + eid + "/sittings/MORNING/question-paper-archive/download");
-            arch.put("restrictedAnswerKeyAvailable", false);
+            arch.put("excelDownloadUrl", "/api/v1/examinations/" + eid + "/sittings/MORNING/question-paper-archive/download-excel");
+            arch.put("dataUrl", "/api/v1/examinations/" + eid + "/sittings/MORNING/question-paper-archive/data");
+            arch.put("restrictedAnswerKeyAvailable", true);
             list.add(arch);
         }
         return v1Success(list, "Question paper archive loaded");
@@ -9671,8 +10496,15 @@ public final class CampusExam {
                               JOIN examination_session es ON es.id = esit.session_id
                               WHERE esit.selected_paper_id = gp.id
                                 AND coalesce(es.is_cancelled, false) = false
-                                AND es.status != 'CANCELLED'
-                                AND esit.status != 'CANCELLED'
+                                AND (
+                                    es.status = 'RELEASED'
+                                    OR esit.status = 'RELEASED'
+                                    OR EXISTS (
+                                        SELECT 1 FROM lab_result_import lri 
+                                        WHERE lri.session_id = es.id 
+                                          AND lri.status = 'RELEASED'
+                                    )
+                                )
                           )
                         ORDER BY gp.paper_number
                         """, bankId);
@@ -10859,8 +11691,19 @@ public final class CampusExam {
             return v1Success(Map.of("loggedOut", true), "Logged out successfully");
         }
         if (path.equals("auth/profile") && method.equals("PATCH")) {
-            String contact = form.get("contactNumber").strip();
-            run(db, "UPDATE account SET contact_number = ? WHERE id = ?", contact, user.id());
+            String contact = form.get("contactNumber");
+            String fullName = form.get("fullName");
+            String email = form.get("email");
+            if (fullName != null && !fullName.isBlank()) {
+                run(db, "UPDATE account SET full_name = ? WHERE id = ?", fullName.strip(), user.id());
+            }
+            if (email != null && !email.isBlank()) {
+                run(db, "UPDATE account SET email = ? WHERE id = ?", email.strip().toLowerCase(Locale.ROOT), user.id());
+            }
+            if (contact != null && !contact.isBlank()) {
+                run(db, "UPDATE account SET contact_number = ? WHERE id = ?", contact.strip(), user.id());
+            }
+            audit(db, user.id(), "UPDATE_PROFILE", "account:" + user.id(), "Updated account profile information");
             return v1Success(buildUserMap(db, user.id()), "Profile updated successfully");
         }
         if (path.equals("auth/preferences/theme") && method.equals("PATCH")) {
@@ -10907,6 +11750,10 @@ public final class CampusExam {
         if (path.startsWith("principal/departments/") && method.equals("PATCH")) {
             long deptId = Long.parseLong(path.substring("principal/departments/".length()));
             return updateV1PrincipalDepartment(db, user, deptId, form);
+        }
+        if (path.startsWith("principal/departments/") && path.endsWith("/workspace") && method.equals("GET")) {
+            long deptId = Long.parseLong(path.substring("principal/departments/".length(), path.length() - "/workspace".length()));
+            return getV1PrincipalDepartmentWorkspace(db, user, deptId, form);
         }
         if (path.equals("principal/hods") && method.equals("GET")) {
             return getV1PrincipalHods(db, user);
@@ -10997,6 +11844,12 @@ public final class CampusExam {
         if (path.startsWith("hod/students/") && method.equals("DELETE")) {
             long studentId = Long.parseLong(path.substring("hod/students/".length()));
             return deleteV1HodIndividualStudent(db, user, studentId);
+        }
+        if (path.equals("hod/student-lists/promote") && method.equals("POST")) {
+            return promoteV1HodStudentsSemester(db, user, form);
+        }
+        if (path.equals("hod/student-lists/graduate") && method.equals("POST")) {
+            return graduateV1HodSemester8(db, user, form);
         }
         if (path.equals("hod/questions") && method.equals("GET")) {
             return getV1HodQuestions(db, user, form);
@@ -11159,6 +12012,25 @@ public final class CampusExam {
             long eid = Long.parseLong(path.substring("examinations/".length(), path.length() - "/question-paper-archive".length()));
             return getV1CoeQuestionPaperArchive(db, user, eid);
         }
+        if (path.startsWith("examinations/") && path.contains("/question-paper-archive/data") && method.equals("GET")) {
+            long eid = Long.parseLong(path.substring("examinations/".length(), path.indexOf("/question-paper-archive/data")).replaceAll("/sittings/.*", ""));
+            String sitName = "MORNING";
+            if (path.contains("/sittings/")) {
+                String sPart = path.substring(path.indexOf("/sittings/") + "/sittings/".length());
+                sitName = sPart.substring(0, sPart.indexOf("/"));
+            }
+            return getV1CoeQuestionPaperArchiveData(db, user, eid, sitName);
+        }
+        if (path.startsWith("examinations/") && path.contains("/question-paper-archive/download-excel") && method.equals("GET")) {
+            long eid = Long.parseLong(path.substring("examinations/".length(), path.indexOf("/question-paper-archive/download-excel")).replaceAll("/sittings/.*", ""));
+            String sitName = "MORNING";
+            if (path.contains("/sittings/")) {
+                String sPart = path.substring(path.indexOf("/sittings/") + "/sittings/".length());
+                sitName = sPart.substring(0, sPart.indexOf("/"));
+            }
+            user.require("COE", "ADMIN");
+            return "__QUESTION_PAPER_XLSX__:" + eid + ":" + sitName;
+        }
         if (path.startsWith("examinations/") && path.contains("/question-paper-archive/download") && method.equals("GET")) {
             long eid = Long.parseLong(path.substring("examinations/".length(), path.indexOf("/question-paper-archive/download")).replaceAll("/sittings/.*", ""));
             String sitName = "MORNING";
@@ -11166,6 +12038,7 @@ public final class CampusExam {
                 String sPart = path.substring(path.indexOf("/sittings/") + "/sittings/".length());
                 sitName = sPart.substring(0, sPart.indexOf("/"));
             }
+            user.require("COE", "ADMIN");
             return "__QUESTION_PAPER_PDF__:" + eid + ":" + sitName;
         }
         if (path.startsWith("examinations/") && method.equals("PUT")) {

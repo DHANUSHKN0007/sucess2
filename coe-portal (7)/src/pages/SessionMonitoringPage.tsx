@@ -325,38 +325,6 @@ export const SessionMonitoringPage: React.FC = () => {
 
         <div className="flex flex-wrap items-center gap-3 shrink-0">
           <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#F5F7FB] dark:bg-[#0F172A] border border-[#D9E2EF] dark:border-[#334155] text-sm">
-            {sseConnected ? (
-              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                Live SSE Stream
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">
-                <span className="w-2 h-2 rounded-full bg-amber-400" />
-                SSE Reconnecting
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#F5F7FB] dark:bg-[#0F172A] border border-[#D9E2EF] dark:border-[#334155] text-sm">
-            <Server
-              className={`w-4 h-4 ${
-                activeSession.labServerStatus === 'Connected'
-                  ? 'text-[#16834A]'
-                  : 'text-[#B42318]'
-              }`}
-            />
-            <span className="text-[#64748B] dark:text-slate-400">Lab Server:</span>
-            <strong
-              className={
-                activeSession.labServerStatus === 'Connected'
-                  ? 'text-[#16834A] dark:text-emerald-400'
-                  : 'text-[#B42318] dark:text-red-400'
-              }
-            >
-              {activeSession.labServerStatus}
-            </strong>
-          </div>
-          <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#F5F7FB] dark:bg-[#0F172A] border border-[#D9E2EF] dark:border-[#334155] text-sm">
             <Clock className="w-4 h-4 text-[#2563EB]" />
             <span className="text-[#64748B] dark:text-slate-400">Remaining:</span>
             <strong className="font-mono text-[#1F2937] dark:text-white">

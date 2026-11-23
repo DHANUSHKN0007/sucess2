@@ -127,8 +127,10 @@ export function parseQuestionPaper(rawText, extractedImages = [], defaultMeta = 
   // Header / Footer / Table of contents noise lines to ignore
   const isNoiseLine = (t) => {
     if (!t) return true;
-    if (/^(?:DATA STRUCTURES AND ALGORITHMS.*|.*MCQ Question Bank.*|.*Question Bank Page \d+ of \d+|Page \d+ of \d+|Topics covered:.*|Total (?:Modules|Questions).*|Module Coverage Questions|Questions|Q\d+\s*–\s*Q\d+)$/i.test(t)) return true;
-    if (/^Module \d+\s+(?:Introduction|Stacks|Singly|Trees|Graphs)/i.test(t)) return true;
+    if (/^(?:DATA STRUCTURES AND ALGORITHMS.*|.*MCQ Question Bank.*|.*Question Bank Page \d+ of \d+|Page \d+ of \d+|Topics covered:.*|Total (?:Modules|Questions).*|Module Coverage Questions|Questions|Q\d+\s*[-–—]\s*Q\d+)$/i.test(t)) return true;
+    if (/^Module\s+\d+\s+(?:Introduction|Stacks|Singly|Trees|Graphs|Coverage|Target)/i.test(t) && /Q\d+\s*[-–—]\s*Q\d+/i.test(t)) return true;
+    if (/^Module\s+\d+\s+Coverage\s+Questions/i.test(t)) return true;
+    if (/^Each module contains \d+ multiple-choice questions/i.test(t)) return true;
     return false;
   };
 
@@ -152,14 +154,21 @@ export function parseQuestionPaper(rawText, extractedImages = [], defaultMeta = 
 
     const flushCurrentQuestion = () => {
       if (currentQ) {
+        const optionKeys = ['A', 'B', 'C', 'D'];
+        const missingOpts = optionKeys.filter(k => !currentQ.options[k].text.trim() && !currentQ.options[k].image);
+        // Discard TOC table lines / pseudo-questions that have no options and no answer
+        if (missingOpts.length === 4 && !currentQ.correctAnswer) {
+          currentQ = null;
+          currentOptKey = null;
+          return;
+        }
+
         // Validation checks for this question
         const errors = [];
         if (!currentQ.questionText.trim() && !currentQ.questionImage) {
           errors.push('Missing question text and image');
         }
         
-        const optionKeys = ['A', 'B', 'C', 'D'];
-        const missingOpts = optionKeys.filter(k => !currentQ.options[k].text.trim() && !currentQ.options[k].image);
         if (missingOpts.length > 0) {
           errors.push(`Missing option(s): ${missingOpts.join(', ')}`);
         }

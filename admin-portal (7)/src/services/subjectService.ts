@@ -67,7 +67,7 @@ export const subjectService = {
       throw new ApiClientError('Authenticated HOD department scope is required.', 403);
     }
 
-    const cleanCode = payload.code.trim().toUpperCase();
+    const cleanCode = payload.code.trim();
     const cleanName = payload.name.trim();
     if (!cleanCode || !cleanName) {
       throw new ApiClientError('Subject Code and Subject Name are required.', 400);
@@ -95,7 +95,7 @@ export const subjectService = {
     if (!actor.departmentId) {
       throw new ApiClientError('Authenticated HOD department scope is required.', 403);
     }
-    const cleanCode = payload.code.trim().toUpperCase();
+    const cleanCode = payload.code.trim();
     const cleanName = payload.name.trim();
     if (!cleanCode || !cleanName) {
       throw new ApiClientError('Subject Code and Subject Name are required.', 400);

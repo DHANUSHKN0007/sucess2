@@ -247,4 +247,37 @@ export const studentService = {
     });
     return res.data;
   },
+
+  async promoteStudentsSemester(params: {
+    sourceSemester: number;
+    sourceSection: string;
+    targetSemester: number;
+    targetSection: string;
+    academicYear?: string;
+  }): Promise<{ message: string; promotedCount: number; sourceSemester: number; targetSemester: number }> {
+    const res = await apiRequest<{
+      message: string;
+      promotedCount: number;
+      sourceSemester: number;
+      targetSemester: number;
+    }>(API_ENDPOINTS.hod.promoteStudents, {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+    return res.data;
+  },
+
+  async graduateSemester8Students(params: {
+    section?: string;
+    academicYear?: string;
+  }): Promise<{ message: string; graduatedCount: number }> {
+    const res = await apiRequest<{
+      message: string;
+      graduatedCount: number;
+    }>(API_ENDPOINTS.hod.graduateStudents, {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+    return res.data;
+  },
 };

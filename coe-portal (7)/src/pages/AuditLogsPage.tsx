@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Download, Search, ShieldCheck } from 'lucide-react';
+import { Download, Eye, Search, ShieldCheck, X } from 'lucide-react';
 import { useExaminationStore } from '../hooks/useExaminationStore';
 import { StatusIndicator } from '../components/StatusIndicator';
 import { exportRowsToCsv } from '../utils/csvExport';
@@ -11,6 +11,7 @@ export const AuditLogsPage: React.FC = () => {
   const [roleFilter, setRoleFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [dateFilter, setDateFilter] = useState<string>('');
+  const [selectedLog, setSelectedLog] = useState<any | null>(null);
 
   const filteredLogs = useMemo(() => {
     return auditLogs.filter((log) => {
@@ -153,7 +154,7 @@ export const AuditLogsPage: React.FC = () => {
       {/* Read-Only Audit Logs Table */}
       <div className="bg-white dark:bg-[#1E293B] border border-[#D9E2EF] dark:border-[#334155] rounded-xl shadow-xs overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table className="w-full min-w-[900px] text-left border-collapse">
             <thead>
               <tr className="bg-[#F5F7FB] dark:bg-[#0F172A]/60 border-b border-[#D9E2EF] dark:border-[#334155] text-xs font-bold text-[#64748B] dark:text-slate-400 uppercase tracking-wider">
                 <th className="py-4 px-5">Activity</th>
@@ -163,6 +164,7 @@ export const AuditLogsPage: React.FC = () => {
                 <th className="py-4 px-5">Relevant Student USN</th>
                 <th className="py-4 px-5">Date &amp; Time</th>
                 <th className="py-4 px-5">Action Status</th>
+                <th className="py-4 px-5 text-right">Details</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#D9E2EF] dark:divide-[#334155] text-sm">
@@ -172,7 +174,9 @@ export const AuditLogsPage: React.FC = () => {
                   className="hover:bg-[#F5F7FB]/60 dark:hover:bg-slate-800/50"
                 >
                   <td className="py-4 px-5 text-[#1F2937] dark:text-slate-100 max-w-lg leading-relaxed">
-                    {log.activity}
+                    <div className="line-clamp-2" title={log.activity}>
+                      {log.activity}
+                    </div>
                   </td>
                   <td className="py-4 px-5 font-bold text-[#1F2937] dark:text-slate-200 whitespace-nowrap">
                     {log.userName}
@@ -197,12 +201,23 @@ export const AuditLogsPage: React.FC = () => {
                       label={log.actionStatus}
                     />
                   </td>
+                  <td className="py-4 px-5 text-right whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLog(log)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-[#D9E2EF] dark:border-[#334155] text-[#2563EB] dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 text-xs font-semibold transition-colors cursor-pointer"
+                      title="Inspect log details"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Inspect</span>
+                    </button>
+                  </td>
                 </tr>
               ))}
               {filteredLogs.length === 0 && (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={8}
                     className="py-10 text-center text-sm text-[#64748B] dark:text-slate-400"
                   >
                     No audit log entries match the current search or filter criteria.
@@ -213,6 +228,83 @@ export const AuditLogsPage: React.FC = () => {
           </table>
         </div>
       </div>
+
+      {/* Audit Log Entry Details Modal */}
+      {selectedLog && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+        >
+          <div className="bg-white dark:bg-[#1E293B] rounded-xl max-w-xl w-full border border-[#D9E2EF] dark:border-[#334155] shadow-xl overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#D9E2EF] dark:border-[#334155] bg-[#F5F7FB] dark:bg-[#0F172A]">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-[#2563EB]" />
+                <h3 className="text-base font-bold text-[#1F2937] dark:text-white">
+                  COE Audit Log Entry Details
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedLog(null)}
+                className="p-1 rounded-md text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 max-h-[75vh] overflow-y-auto text-xs">
+              <div className="grid grid-cols-2 gap-3 p-3.5 rounded-lg bg-[#F8FAFC] dark:bg-[#0F172A]/70 border border-[#D9E2EF] dark:border-[#334155]">
+                <div>
+                  <div className="text-[#64748B] font-medium">Recorded Date & Time</div>
+                  <div className="font-mono font-semibold text-[#1F2937] dark:text-white mt-0.5">{selectedLog.timestamp}</div>
+                </div>
+                <div>
+                  <div className="text-[#64748B] font-medium">Action Status</div>
+                  <div className="mt-0.5">
+                    <StatusIndicator tone={getStatusTone(selectedLog.actionStatus)} label={selectedLog.actionStatus} />
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[#64748B] font-medium">Responsible Operator</div>
+                  <div className="font-semibold text-[#1F2937] dark:text-white mt-0.5">{selectedLog.userName}</div>
+                  <div className="text-[11px] text-[#64748B]">Role: {selectedLog.userRole}</div>
+                </div>
+                <div>
+                  <div className="text-[#64748B] font-medium">Examination Reference</div>
+                  <div className="font-semibold text-[#1F2937] dark:text-white mt-0.5">{selectedLog.examinationRef}</div>
+                </div>
+                <div>
+                  <div className="text-[#64748B] font-medium">Student USN Reference</div>
+                  <div className="font-mono text-[#1F2937] dark:text-white mt-0.5">{selectedLog.studentUsn || 'N/A'}</div>
+                </div>
+                <div>
+                  <div className="text-[#64748B] font-medium">Audit Record ID</div>
+                  <div className="font-mono text-[11px] text-[#64748B] mt-0.5">{selectedLog.id}</div>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs font-bold uppercase tracking-wider text-[#64748B] dark:text-slate-400 mb-1.5">
+                  Complete Recorded Activity
+                </div>
+                <div className="p-3.5 rounded-lg bg-white dark:bg-[#0F172A] border border-[#D9E2EF] dark:border-[#334155] font-mono text-xs leading-relaxed text-[#1F2937] dark:text-slate-200 whitespace-pre-wrap break-words">
+                  {selectedLog.activity}
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-3 border-t border-[#D9E2EF] dark:border-[#334155]">
+                <button
+                  type="button"
+                  onClick={() => setSelectedLog(null)}
+                  className="px-4 py-2 text-xs font-semibold rounded-md bg-[#2563EB] hover:bg-blue-700 text-white cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
