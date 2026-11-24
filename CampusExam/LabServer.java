@@ -1180,15 +1180,17 @@ public final class LabServer {
     }
 
     private static long calculateScheduledEndMs(String examDate, String endTime, String startTime, int durationMinutes) {
+        long start = calculateScheduledStartMs(examDate, startTime);
         try {
             if (endTime != null && !endTime.isBlank() && !endTime.equals("null")) {
                 if (endTime.length() == 5) endTime += ":00";
                 LocalDate d = LocalDate.parse(examDate.trim());
                 LocalTime t = LocalTime.parse(endTime.trim());
-                return d.atTime(t).atZone(IST_ZONE).toInstant().toEpochMilli();
+                long end = d.atTime(t).atZone(IST_ZONE).toInstant().toEpochMilli();
+                // 23:30 plus 90 minutes is an end clock of 01:00, which is the next day, not an hour that already passed.
+                return end < start ? d.plusDays(1).atTime(t).atZone(IST_ZONE).toInstant().toEpochMilli() : end;
             }
         } catch (Exception ignored) {}
-        long start = calculateScheduledStartMs(examDate, startTime);
         return start + (durationMinutes * 60L * 1000L);
     }
 
