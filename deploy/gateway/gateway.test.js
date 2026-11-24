@@ -24,6 +24,7 @@ function send(port, { method = 'GET', path: p = '/', headers = {}, body } = {}) 
 }
 
 async function setup(t, extra = {}) {
+  const { labStatus = 200, ...gatewayCfg } = extra;
   const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-dist-'));
   fs.mkdirSync(path.join(distDir, 'assets'));
   fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html><title>portal</title>');
@@ -37,12 +38,12 @@ async function setup(t, extra = {}) {
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
       seen.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString() });
-      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'max-age=60' });
+      res.writeHead(labStatus, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'max-age=60' });
       res.end('{"ok":true}');
     });
   });
   const labPort = await listen(lab);
-  const gateway = createGateway({ distDir, labPort, logFile: null, maxBodyBytes: 100, ...extra });
+  const gateway = createGateway({ distDir, labPort, logFile: null, maxBodyBytes: 100, ...gatewayCfg });
   const port = await listen(gateway);
   t.after(() => { gateway.close(); lab.close(); fs.rmSync(distDir, { recursive: true, force: true }); });
   return { port, seen };
@@ -164,4 +165,63 @@ test('answers 502 when the lab server is down', async (t) => {
   const res = await send(port, { path: '/api/health' });
   assert.equal(res.status, 502);
   assert.equal(JSON.parse(res.body).errorCode, 'LAB_SERVER_UNAVAILABLE');
+});
+
+test('only the configured header, holding one IP, becomes the trusted client address', async (t) => {
+  const { port, seen } = await setup(t, { clientIpHeader: 'x-test-client' });
+  const get = (headers) => send(port, { path: '/api/health', headers });
+  await get({ 'X-Test-Client': '203.0.113.7' });
+  await get({ 'X-Test-Client': '2001:db8::7', 'X-Gateway-Client': '6.6.6.6' });
+  await get({ 'X-Gateway-Client': '6.6.6.6' });
+  await get({ 'X-Test-Client': '1.1.1.1, 2.2.2.2', 'X-Gateway-Client': '6.6.6.6' });
+  await get({ 'X-Test-Client': 'not-an-ip' });
+  await get({ 'X-Forwarded-For': '5.5.5.5' });
+  assert.deepEqual(seen.map((r) => r.headers['x-gateway-client']), ['203.0.113.7', '2001:db8::7', undefined, undefined, undefined, undefined]);
+});
+
+test('without CLIENT_IP_HEADER no address is trusted, whatever the client sends', async (t) => {
+  const { port, seen } = await setup(t);
+  await send(port, { path: '/api/health', headers: { 'X-Forwarded-For': '5.5.5.5', 'X-Real-IP': '5.5.5.5', 'X-Gateway-Client': '6.6.6.6' } });
+  assert.equal(seen[0].headers['x-gateway-client'], undefined);
+});
+
+test('failed logins from one trusted client are cut off after 20 a minute, others are not', async (t) => {
+  const { port, seen } = await setup(t, { clientIpHeader: 'x-test-client', labStatus: 401 });
+  const login = (ip, route = '/api/student/login') => send(port, { method: 'POST', path: route, headers: { 'X-Test-Client': ip, 'Content-Type': 'application/json' }, body: '{}' });
+  for (let i = 0; i < 20; i++) assert.equal((await login('203.0.113.7', i % 2 ? '/api/instructor/login' : '/api/student/login')).status, 401);
+  const blocked = await login('203.0.113.7');
+  assert.equal(blocked.status, 429);
+  assert.equal(JSON.parse(blocked.body).errorCode, 'RATE_LIMITED');
+  assert.equal(seen.length, 20, 'the blocked attempt never reached the lab server');
+  assert.equal((await login('203.0.113.8')).status, 401, 'another client is unaffected');
+  assert.equal((await send(port, { path: '/api/health', headers: { 'X-Test-Client': '203.0.113.7' } })).status, 401, 'only the login routes are limited');
+});
+
+test('with no trusted address the gateway does not limit logins itself', async (t) => {
+  const { port, seen } = await setup(t, { labStatus: 401 });
+  for (let i = 0; i < 25; i++) assert.equal((await send(port, { method: 'POST', path: '/api/student/login', body: '{}' })).status, 401);
+  assert.equal(seen.length, 25);
+});
+
+test('the access log shows which address headers arrive and never holds tokens or bodies', async (t) => {
+  const logFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gateway-log-')), 'logs', 'gateway.log');
+  const { port } = await setup(t, { logFile, clientIpHeader: 'x-test-client' });
+  await send(port, {
+    method: 'POST', path: '/api/student/login?usn=QUERYSECRET',
+    headers: { 'X-Test-Client': '203.0.113.7', 'X-Forwarded-For': '198.51.100.4', 'X-Odd-Thing': 'v', Authorization: 'Bearer TOKENSECRET', 'Content-Type': 'application/json' },
+    body: '{"dateOfBirth":"BODYSECRET"}',
+  });
+  await send(port, { path: '/api/monitoring/sessions' });
+  let log = '';
+  for (let i = 0; i < 20 && !log.includes('/api/monitoring/sessions'); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    log = fs.readFileSync(logFile, 'utf8');
+  }
+  assert.match(log, /START client-address-header=x-test-client/);
+  assert.match(log, /HEADER-SEEN x-forwarded-for = 198\.51\.100\.4 \(socket /);
+  assert.match(log, /HEADER-SEEN x-test-client = 203\.0\.113\.7/);
+  assert.match(log, /HEADER-SEEN x-odd-thing \(socket /, 'a header that is not address-like is named but its value is not logged');
+  assert.match(log, / POST \/api\/student\/login 200 203\.0\.113\.7\n/);
+  assert.match(log, / GET \/api\/monitoring\/sessions 404 -\n/);
+  for (const secret of ['TOKENSECRET', 'BODYSECRET', 'QUERYSECRET']) assert.doesNotMatch(log, new RegExp(secret));
 });

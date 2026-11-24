@@ -109,12 +109,20 @@ def main():
     for i in range(16):
         for samples, usn, dob in [(unknown, f"4MH99ZZ{i:03d}", "2004-01-01"), (wrong_dob, f"4MH21CS00{6 + i % 4}", "1999-12-31")]:
             started = time.perf_counter()
-            code, body = call("POST", "student/login", {"usn": usn, "dateOfBirth": dob, "workstationId": "LOCKDOWN-PC-99"})
+            # A workstation ID of its own per probe keeps the per-source failure cap (checked below) out of this comparison.
+            code, body = call("POST", "student/login", {"usn": usn, "dateOfBirth": dob, "workstationId": f"LOCKDOWN-{usn}"})
             samples.append((time.perf_counter() - started) * 1000)
             bodies.add((code, body.get("errorCode"), body.get("error"), body.get("message")))
     check("Unknown USN and wrong DOB give identical responses", len(bodies) == 1, f"{len(bodies)} distinct: {sorted(bodies)[0][:2]}")
     gap = abs(statistics.median(unknown) - statistics.median(wrong_dob))
     check("Unknown USN and wrong DOB take comparable time", gap < 25, f"median gap {gap:.1f} ms")
+
+    # Sweeping many USNs from one workstation is cut off before the per-USN lockout ever applies.
+    for i in range(10):
+        code, _ = call("POST", "student/login", {"usn": f"4MH98ZZ{i:03d}", "dateOfBirth": "2004-01-01", "workstationId": "LOCKDOWN-SWEEP"})
+    check("10th failed student login from one workstation still answered 401", code == 401, f"HTTP {code}")
+    code, body = call("POST", "student/login", {"usn": "4MH98ZZ010", "dateOfBirth": "2004-01-01", "workstationId": "LOCKDOWN-SWEEP"})
+    check("11th failed student login from one workstation rate-limited", code == 429 and body.get("errorCode") == "RATE_LIMITED", f"HTTP {code}, {body.get('errorCode')}")
 
     # Staff routes refuse anything the gateway forwarded.
     code, body = call("GET", "monitoring/sessions", headers={"X-Gateway-Origin": "gateway"})

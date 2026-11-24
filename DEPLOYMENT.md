@@ -40,8 +40,13 @@ the hash with `deploy/make-instructor-credential.ps1 [-Password <pw>]` or
 `deploy/make-instructor-credential.sh [pw]`; with no password they generate a strong one
 and print it once. Failed logins are limited to 5 per 60 s per workstation ID (then 429
 `INSTRUCTOR_LOGIN_RATE_LIMITED`), and every failure in the last 60 s anywhere adds 1 s to
-each later attempt, up to 30 s. The workstation ID is client-supplied; the gateway can
-later supply a trusted client address at the `PART B HOOK` in `LabServer.java`.
+each later attempt, up to 30 s. Student logins keep their per-USN lockout (5 failures, 60 s)
+and are also limited to 10 failures per 60 s per source (429 `RATE_LIMITED`). The source key
+for both logins is the workstation ID, which a client supplies and can rotate, prefixed by
+the client address when the gateway forwards one in `X-Gateway-Client` (see Gateway below).
+With no trusted client address, the global delay above is what still slows an instructor
+password guess; student guessing is then limited only by the per-USN lockout and the
+per-workstation cap.
 Test suites read the account from `LAB_INSTRUCTOR_USERNAME` / `LAB_INSTRUCTOR_PASSWORD`.
 
 `requireLocalStaff` returns 403 `STAFF_ROUTE_LOCAL_ONLY` when the request carries an
@@ -73,3 +78,47 @@ would pass the locality check.
 | `LAB_STAFF_ALLOW_REMOTE` | `false` | `true` lets non-local callers use the LOCAL STAFF routes. |
 | `LAB_INSTRUCTOR_USERNAME` | unset | Instructor login name (case-insensitive). Central reads the same variable for its own `instructor/login`; with either variable unset or malformed, that login answers 503 `INSTRUCTOR_LOGIN_NOT_CONFIGURED`. |
 | `LAB_INSTRUCTOR_PASSWORD_HASH` | unset | `<saltHex>:<hashHex>`, PBKDF2-HMAC-SHA256, 600000 iterations, 32-byte hash. Central reads it too. |
+
+### Gateway (`deploy/gateway/server.js`)
+
+Serves the built student portal and forwards only the routes below to the lab server on
+`127.0.0.1:8082`. It binds `127.0.0.1` only. Any other path, method or spelling under `/api`
+is a plain 404. Only `Authorization`, `Content-Type`, `Accept` and `User-Agent` are passed on,
+so a client's `X-Simulated-Time-Ms`, `X-Effective-Time-Ms` and `X-Bypass-Start-Check` never
+arrive. It sets `X-Gateway-Origin: gateway` on every proxied request, replacing anything the
+client sent. It reads the portal into memory at start, so a rebuild needs a restart.
+
+| Proxied | Routes |
+|---|---|
+| PUBLIC | `GET health` |
+| STUDENT | `POST student/login`, `student/logout`; `GET student/instructions`, `student/exam-session`, `student/exam/questions`, `student/exam/state`; `POST student/exam/start`, `student/exam/answers`, `student/exam/submit`, `student/exam/heartbeat`; `POST security/violation` |
+| unlock | `POST security/unlock` |
+| INSTRUCTOR (only what the portal calls) | `POST instructor/login`, `instructor/logout`; `GET recovery/relogin-authorisations`, `recovery/overview`, `recovery/transfers`, `recovery/audit-logs`, `recovery/config`; `POST recovery/relogin-authorisations/approve`, `recovery/relogin-authorisations/consume` |
+
+Never proxied: LOCAL STAFF, SYSTEM and TEST routes, `package/*`, `results/*`,
+`recovery/report-crash`, and the alias spellings the portal does not use
+(`auth/student-login`, `student/heartbeat`, `recovery/login`, `recovery/logout`,
+`recovery/consume-token`, `labs/{x}/sittings/{x}/verify-unlock`). The portal also calls three
+paths the lab server does not serve: `PUT recovery/config`, `POST recovery/fresh-start` and
+`GET security/audit-logs` (central serves that one). They are not proxied; each call fails
+and the portal falls back to its local data.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `GATEWAY_PORT` | `3002` | Port on `127.0.0.1`. |
+| `LAB_PORT` | `8082` | Lab server port on `127.0.0.1`. |
+| `PORTAL_DIST_DIR` | the portal's `dist/` | Built portal to serve. |
+| `GATEWAY_LOG_FILE` | `CampusExam/lab_storage/logs/gateway.log` | Access log: time, method, path without query, status, client address. Never bodies or tokens. |
+| `GATEWAY_MAX_BODY_BYTES` | `1048576` | Larger request bodies get 413. |
+| `CLIENT_IP_HEADER` | unset | Name of the request header that carries the caller's address. |
+
+`CLIENT_IP_HEADER` has no default because which header Tailscale Funnel sets is not assumed.
+Start the gateway without it, send a request through the Funnel URL, and read the log: the
+first time each header name arrives, a `HEADER-SEEN` line records it, with its value if the
+name looks like an address. Set `CLIENT_IP_HEADER` to the header that holds the caller's IP.
+The gateway believes that header only when it holds exactly one IP address; a list, or a
+missing header, logs one `WARNING` line and the request is treated as having no trusted
+address. With a trusted address the gateway sets `X-Gateway-Client` to it (replacing anything
+the client sent), refuses a client's 21st failed login in a minute with 429, and the lab
+server adds the address to its login limiter keys. With none, the gateway sends no
+`X-Gateway-Client` and the lab server's own limits apply.

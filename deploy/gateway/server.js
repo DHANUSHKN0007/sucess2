@@ -3,6 +3,7 @@
 // allowlisted student/recovery API routes to the lab server. It listens on loopback only; Tailscale is the way in.
 const http = require('http');
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 
 // Built from the route table in DEPLOYMENT.md and cross-checked against every /api call in the portal source.
@@ -50,6 +51,12 @@ const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'te
 const UPSTREAM_TIMEOUT_MS = 60000; // above the 30 s the lab server may hold a slowed instructor login
 const HASHED_ASSET = /^\/assets\/.+-[\w-]{8}\.\w+$/;
 
+const LOGIN_ROUTES = new Set(['/api/student/login', '/api/instructor/login']);
+const LOGIN_FAILURES_PER_MINUTE = 20; // per client address, across both logins; the lab server applies its own limits too
+// Header names that may carry the caller's address. Their values are logged the first time they appear, so the
+// deployer picks CLIENT_IP_HEADER from what Tailscale Funnel really sends rather than from an assumption.
+const ADDRESS_HEADER = /forward|real-ip|client|ingress|(^|-)ip($|-)|^via$|^tailscale/;
+
 // Preloaded once: the gateway serves only files it indexed here, so path tricks (.., encoded dots, Windows
 // short names or ::$DATA streams) cannot reach anything else, and no source map is ever indexed.
 // Rebuilding the portal needs a gateway restart.
@@ -75,11 +82,45 @@ function openLog(file) {
 }
 
 // Control characters are replaced so a crafted URL cannot forge extra log lines.
-const printable = (s) => String(s).replace(/[^\x21-\x7e]/g, '?').slice(0, 200);
+const printable = (s) => String(s).replace(/[^\x20-\x7e]/g, '?').slice(0, 200);
 
 function createGateway(cfg) {
   const portal = loadPortal(cfg.distDir);
   const log = cfg.logFile ? openLog(cfg.logFile) : () => {};
+  const seenHeaders = new Set();
+  const loginFailures = new Map(); // client address -> times of its recent 401s on a login route
+  let warnedClientHeader = false;
+  log(`${new Date().toISOString()} START client-address-header=${cfg.clientIpHeader || 'none'}`);
+
+  // Logs each header name the first time it arrives, with its value when the name looks like an address.
+  function noteHeaders(req) {
+    for (const name of Object.keys(req.headers)) {
+      if (seenHeaders.has(name) || seenHeaders.size >= 100) continue;
+      seenHeaders.add(name);
+      log(`HEADER-SEEN ${printable(name)}${ADDRESS_HEADER.test(name) ? ` = ${printable(req.headers[name])}` : ''} (socket ${req.socket.remoteAddress})`);
+    }
+  }
+
+  // The address of the real caller, or null. Only the header named in CLIENT_IP_HEADER is believed, and only when it
+  // holds one IP: a list means a hop appended to a value the client may have written itself.
+  function clientOf(req) {
+    if (!cfg.clientIpHeader) return null;
+    const value = req.headers[cfg.clientIpHeader];
+    if (typeof value === 'string' && net.isIP(value.trim())) return value.trim();
+    if (!warnedClientHeader) {
+      warnedClientHeader = true;
+      log(`WARNING CLIENT_IP_HEADER=${cfg.clientIpHeader} was ${value === undefined ? 'missing' : `not a single IP address: ${printable(value)}`}; such requests rely on the lab server's own limits`);
+    }
+    return null;
+  }
+
+  function recentLoginFailures(client, now) {
+    const recent = (loginFailures.get(client) || []).filter((at) => now - at < 60000);
+    if (recent.length) loginFailures.set(client, recent); else loginFailures.delete(client);
+    return recent.length;
+  }
+  const sweep = setInterval(() => { for (const client of [...loginFailures.keys()]) recentLoginFailures(client, Date.now()); }, 60000);
+  sweep.unref();
 
   function reply(res, status, type, body) {
     res.writeHead(status, { 'Content-Type': type, 'Content-Length': Buffer.byteLength(body) });
@@ -104,7 +145,7 @@ function createGateway(cfg) {
     res.end(req.method === 'HEAD' ? undefined : file.body);
   }
 
-  function proxy(req, res, target) {
+  function proxy(req, res, client) {
     if (Number(req.headers['content-length'] || 0) > cfg.maxBodyBytes) {
       req.resume();
       return fail(res, 413, 'REQUEST_TOO_LARGE', 'Request body is too large.');
@@ -121,17 +162,24 @@ function createGateway(cfg) {
         chunks.push(chunk);
       }
     });
-    req.on('end', () => { if (!tooLarge) forward(req, res, target, Buffer.concat(chunks)); });
+    req.on('end', () => { if (!tooLarge) forward(req, res, client, Buffer.concat(chunks)); });
   }
 
-  function forward(req, res, target, body) {
+  function forward(req, res, client, body) {
     const headers = { host: `127.0.0.1:${cfg.labPort}`, 'content-length': body.length };
     for (const name of FORWARDED_HEADERS) if (req.headers[name]) headers[name] = req.headers[name];
     // The lab server refuses staff routes on any request carrying this. Set here for every proxied request,
     // after the copy above, so a client-supplied value can never stand in for it or be passed through.
     headers['x-gateway-origin'] = 'gateway';
+    // The lab server keys its login limits on this. Only ever the address checked in clientOf(); a client-sent
+    // X-Gateway-Client is never copied, and with no trusted address none is sent.
+    if (client) headers['x-gateway-client'] = client;
 
-    const upstream = http.request({ host: '127.0.0.1', port: cfg.labPort, method: req.method, path: target, headers }, (upRes) => {
+    // The allowlisted path is forwarded as written; it is never decoded or normalised on the way.
+    const upstream = http.request({ host: '127.0.0.1', port: cfg.labPort, method: req.method, path: req.url, headers }, (upRes) => {
+      if (client && upRes.statusCode === 401 && LOGIN_ROUTES.has(req.url.split('?')[0])) {
+        loginFailures.set(client, [...(loginFailures.get(client) || []), Date.now()]);
+      }
       const out = {};
       for (const [name, value] of Object.entries(upRes.headers)) {
         // Same-origin only: the lab server's own CORS headers are not passed on.
@@ -162,20 +210,26 @@ function createGateway(cfg) {
     const url = req.url || '/';
     const q = url.indexOf('?');
     const pathname = q === -1 ? url : url.slice(0, q);
+    noteHeaders(req);
+    const client = clientOf(req);
     // Only method, path (no query string), status and client are logged: never bodies or tokens.
-    res.on('finish', () => log(`${new Date().toISOString()} ${req.method} ${printable(pathname)} ${res.statusCode} -`));
+    res.on('finish', () => log(`${new Date().toISOString()} ${req.method} ${printable(pathname)} ${res.statusCode} ${client || '-'}`));
 
     if (pathname === '/api' || pathname.startsWith('/api/')) {
       res.setHeader('Cache-Control', 'no-store');
-      // The allowlisted path is forwarded as written; it is never decoded or normalised on the way.
       if (!ALLOWED.has(`${req.method} ${pathname}`)) return notFound(res);
-      return proxy(req, res, url);
+      // Without a trusted client address there is nothing to count against here; the lab server's own limits apply.
+      if (client && LOGIN_ROUTES.has(pathname) && recentLoginFailures(client, Date.now()) >= LOGIN_FAILURES_PER_MINUTE) {
+        return fail(res, 429, 'RATE_LIMITED', 'Too many failed login attempts. Try again in a minute.');
+      }
+      return proxy(req, res, client);
     }
     serveStatic(req, res, pathname);
   });
   server.headersTimeout = 15000;
   server.requestTimeout = 30000;
   server.on('clientError', (err, socket) => socket.destroy());
+  server.on('close', () => clearInterval(sweep));
   return server;
 }
 
@@ -191,6 +245,8 @@ function fromEnv() {
     distDir: path.resolve(process.env.PORTAL_DIST_DIR || path.join(root, 'student-portal (Final)', 'student-portal (Final)', 'student-portal', 'dist')),
     logFile: process.env.GATEWAY_LOG_FILE || path.join(root, 'CampusExam', 'lab_storage', 'logs', 'gateway.log'),
     maxBodyBytes: Number(process.env.GATEWAY_MAX_BODY_BYTES || 1024 * 1024),
+    // No default on purpose: which header carries the caller's address behind Tailscale Funnel is read from the log, not assumed.
+    clientIpHeader: (process.env.CLIENT_IP_HEADER || '').trim().toLowerCase(),
   };
 }
 
@@ -209,6 +265,9 @@ if (require.main === module) {
       console.log(`Exam gateway listening on http://127.0.0.1:${cfg.port} -> lab server 127.0.0.1:${cfg.labPort}`);
       console.log(`Portal: ${cfg.distDir}`);
       console.log(`Access log: ${cfg.logFile}`);
+      console.log(cfg.clientIpHeader
+        ? `Client address header: ${cfg.clientIpHeader}`
+        : 'Client address header: none (CLIENT_IP_HEADER is not set). Check the access log for HEADER-SEEN lines to see what Tailscale sends.');
     });
   } catch (err) {
     console.error(err.message);

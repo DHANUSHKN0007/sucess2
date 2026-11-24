@@ -49,6 +49,7 @@ public final class LabServer {
     private static byte[] INSTRUCTOR_HASH;
     private static final Map<String, ConcurrentLinkedDeque<Long>> INSTRUCTOR_FAILURES_BY_SOURCE = new ConcurrentHashMap<>();
     private static final ConcurrentLinkedDeque<Long> INSTRUCTOR_FAILURES_GLOBAL = new ConcurrentLinkedDeque<>();
+    private static final Map<String, ConcurrentLinkedDeque<Long>> STUDENT_FAILURES_BY_SOURCE = new ConcurrentHashMap<>();
     public static final ZoneId IST_ZONE = ZoneId.of("Asia/Kolkata");
     public static String LAB_ID = "LAB-CSE-01";
     public static int PORT = 8082;
@@ -1234,6 +1235,14 @@ public final class LabServer {
 
         long now = getEffectiveTime(exchange, form);
 
+        // Sweeping many USNs from one machine never trips the per-USN lockout below, so failures are also counted
+        // per source. This uses the real clock, not `now`, which a test-mode client can set.
+        String sourceKey = loginSourceKey(exchange, comp);
+        ConcurrentLinkedDeque<Long> sourceFailures = STUDENT_FAILURES_BY_SOURCE.get(sourceKey);
+        if (sourceFailures != null && recentFailures(sourceFailures, System.currentTimeMillis()) >= 10) {
+            throw new LabException(429, "Too many failed login attempts from this workstation. Try again in a minute.", "RATE_LIMITED");
+        }
+
         // 1. Rate Limiting Check: max 5 failed attempts locks USN for 60 seconds
         Long lockout = RuntimeState.loginLockoutUntil.get(usn);
         if (lockout != null && now < lockout) {
@@ -1285,7 +1294,7 @@ public final class LabServer {
         }
 
         if (candidateCohorts.isEmpty() || student == null) {
-            recordLoginFailure(usn, now);
+            recordLoginFailure(usn, now, sourceKey);
             throw new LabException(401, STUDENT_LOGIN_REJECTED, "INVALID_CREDENTIALS");
         }
 
@@ -1295,7 +1304,7 @@ public final class LabServer {
         String normExpected = normalizeDateString(expectedDob);
         boolean validAuth = normExpected.equals(normDob) || expectedDob.equals(dob) || dob.replace("-", "").equals(expectedDob.replace("-", ""));
         if (!validAuth) {
-            recordLoginFailure(usn, now);
+            recordLoginFailure(usn, now, sourceKey);
             throw new LabException(401, STUDENT_LOGIN_REJECTED, "INVALID_CREDENTIALS");
         }
 
@@ -1343,7 +1352,7 @@ public final class LabServer {
         if (form.containsKey("sitting") || form.containsKey("sittingName") || form.containsKey("sittingCode")) {
             String reqSit = String.valueOf(form.getOrDefault("sitting", form.getOrDefault("sittingName", form.get("sittingCode")))).trim().toUpperCase(Locale.ROOT);
             if (!reqSit.isEmpty() && !reqSit.contains(sittingName.toUpperCase(Locale.ROOT)) && !sittingName.toUpperCase(Locale.ROOT).contains(reqSit)) {
-                recordLoginFailure(usn, now);
+                recordLoginFailure(usn, now, sourceKey);
                 throw new LabException(401, STUDENT_LOGIN_REJECTED, "INVALID_CREDENTIALS");
             }
         }
@@ -1536,7 +1545,8 @@ public final class LabServer {
         return Json.stringify(resp);
     }
 
-    private static void recordLoginFailure(String usn, long now) {
+    private static void recordLoginFailure(String usn, long now, String sourceKey) {
+        STUDENT_FAILURES_BY_SOURCE.computeIfAbsent(sourceKey, k -> new ConcurrentLinkedDeque<>()).addLast(System.currentTimeMillis());
         int fails = RuntimeState.loginFailureCounts.getOrDefault(usn, 0) + 1;
         RuntimeState.loginFailureCounts.put(usn, fails);
         if (fails >= 5) {
@@ -2916,14 +2926,19 @@ public final class LabServer {
         }
     }
 
-    // PART B HOOK: failures are keyed on the client-supplied workstation ID because every request behind the
-    // gateway shares one source address. When the gateway forwards a trusted client address, add it to this key.
-    private static String instructorLoginSourceKey(HttpExchange exchange, Map<String, Object> form) {
-        Object ws = form.get("workstationId");
-        return ws == null || String.valueOf(ws).isBlank() ? "UNKNOWN-WORKSTATION" : String.valueOf(ws).trim().toUpperCase(Locale.ROOT);
+    // Key for the per-source failure limits on both logins. Every request behind the gateway arrives from loopback,
+    // so the gateway forwards the client address it trusts in X-Gateway-Client (it sends nothing when it has none).
+    // Without that header only the client-supplied workstation ID is left, which a client can rotate; the global
+    // delay on instructor logins is what still slows guessing then.
+    private static String loginSourceKey(HttpExchange exchange, Object workstationId) {
+        String ws = workstationId == null || String.valueOf(workstationId).isBlank() ? "UNKNOWN-WORKSTATION" : String.valueOf(workstationId).trim().toUpperCase(Locale.ROOT);
+        String client = exchange.getRequestHeaders().getFirst("X-Gateway-Client");
+        if (client == null || client.isBlank()) return ws;
+        client = client.trim();
+        return (client.length() > 64 ? client.substring(0, 64) : client) + "|" + ws;
     }
 
-    private static int recentInstructorFailures(ConcurrentLinkedDeque<Long> failures, long now) {
+    private static int recentFailures(ConcurrentLinkedDeque<Long> failures, long now) {
         Long oldest;
         while ((oldest = failures.peekFirst()) != null && now - oldest >= 60000L) failures.pollFirst();
         return failures.size();
@@ -2934,13 +2949,13 @@ public final class LabServer {
             throw new LabException(503, "Lab Instructor login is not configured on this server. Ask the administrator to set LAB_INSTRUCTOR_USERNAME and LAB_INSTRUCTOR_PASSWORD_HASH.", "INSTRUCTOR_LOGIN_NOT_CONFIGURED");
         }
         long now = System.currentTimeMillis();
-        ConcurrentLinkedDeque<Long> sourceFailures = INSTRUCTOR_FAILURES_BY_SOURCE.computeIfAbsent(instructorLoginSourceKey(exchange, form), k -> new ConcurrentLinkedDeque<>());
-        if (recentInstructorFailures(sourceFailures, now) >= 5) {
+        ConcurrentLinkedDeque<Long> sourceFailures = INSTRUCTOR_FAILURES_BY_SOURCE.computeIfAbsent(loginSourceKey(exchange, form.get("workstationId")), k -> new ConcurrentLinkedDeque<>());
+        if (recentFailures(sourceFailures, now) >= 5) {
             throw new LabException(429, "Too many failed instructor sign-in attempts from this workstation. Try again in a minute.", "INSTRUCTOR_LOGIN_RATE_LIMITED");
         }
         // Each recent failure anywhere slows every attempt by a second (max 30 s): guessing gets slow, but a
         // student hammering the form can never lock invigilators out completely.
-        long delayMs = Math.min(recentInstructorFailures(INSTRUCTOR_FAILURES_GLOBAL, now) * 1000L, 30000L);
+        long delayMs = Math.min(recentFailures(INSTRUCTOR_FAILURES_GLOBAL, now) * 1000L, 30000L);
         if (delayMs > 0) Thread.sleep(delayMs);
 
         String recId = String.valueOf(form.getOrDefault("recoveryId", form.getOrDefault("id", form.getOrDefault("username", "")))).trim();
