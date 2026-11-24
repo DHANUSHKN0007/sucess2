@@ -2290,7 +2290,21 @@ public final class CampusExam {
         res.put("usn", usn);
         res.put("version", vLetter);
         res.put("sessionMetadata", LabRuntime.sessionMetadata);
-        res.put("questions", vData.get("questions")); // Contains questions WITHOUT correct answers!
+        // Copy only the fields a candidate may see; the package keeps answer keys apart, but a question map must never
+        // reach a student whole, whatever a future package builder puts in it.
+        List<Map<String, Object>> paper = new ArrayList<>();
+        if (vData.get("questions") instanceof List<?> versionQuestions) {
+            for (Object item : versionQuestions) {
+                if (item instanceof Map<?, ?> question) {
+                    Map<String, Object> visible = new LinkedHashMap<>();
+                    for (String field : new String[]{"position", "questionUid", "prompt", "options", "marks"}) {
+                        if (question.containsKey(field)) visible.put(field, question.get(field));
+                    }
+                    paper.add(visible);
+                }
+            }
+        }
+        res.put("questions", paper);
         res.put("savedAnswers", LabRuntime.studentAnswers.getOrDefault(usn, Collections.emptyMap()));
         return Json.stringify(res);
     }
