@@ -9520,6 +9520,7 @@ public final class CampusExam {
                 packageData.put("durationMinutes", rs.getInt("duration_minutes"));
             }
         }
+        packageData.put("cycleName", one(db, "SELECT c.title FROM examination_session es JOIN examination_cycle c ON c.id = es.cycle_id WHERE es.id = ?", examId));
 
         Map<String, Object> versionsMap = new LinkedHashMap<>();
         Map<String, Integer> answerKeysMap = new LinkedHashMap<>();
@@ -9559,16 +9560,20 @@ public final class CampusExam {
                 ORDER BY usn
                 """, examId, sitCode); var rs = st.executeQuery()) {
             while (rs.next()) {
-                rosterList.add(Map.of(
-                        "usn", rs.getString("usn"),
-                        "fullName", rs.getString("full_name"),
-                        "dob", rs.getString("date_of_birth"),
-                        "originalSection", rs.getString("original_section") != null ? rs.getString("original_section") : "A",
-                        "assignedVersion", rs.getString("assigned_version") != null ? rs.getString("assigned_version") : "A"
-                ));
+                // Not Map.of: it throws a bare NullPointerException on a null value, and requirePackageComplete names the field.
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("usn", rs.getString("usn"));
+                entry.put("fullName", rs.getString("full_name"));
+                entry.put("dob", rs.getString("date_of_birth"));
+                entry.put("originalSection", rs.getString("original_section") != null ? rs.getString("original_section") : "A");
+                entry.put("assignedVersion", rs.getString("assigned_version") != null ? rs.getString("assigned_version") : "A");
+                rosterList.add(entry);
             }
         }
         packageData.put("roster", rosterList);
+
+        // Before the unlock credential is generated below, so a refused package leaves nothing behind.
+        requirePackageComplete(packageData, sitDisplayName);
 
         try (var vst = sql(db, "SELECT verifier_hash, salt, iterations FROM session_unlock_credential WHERE session_id=? AND sitting_name=? AND status='Active' ORDER BY revision DESC LIMIT 1", examId, sitCode);
              var vrs = vst.executeQuery()) {
@@ -9623,6 +9628,62 @@ public final class CampusExam {
                 "Package " + packageUid + " verified and cryptographically acknowledged by Lab Server " + labId);
 
         return v1Success(fetchCoeExaminationDto(db, examId), "Package encrypted, signed, transferred, and verified by Lab Server");
+    }
+
+    // A package with a missing or unreadable field is refused here, before it is encrypted or sent. The lab cannot name
+    // the field: it fails to load the package, and every student on it sees "invalid credentials".
+    @SuppressWarnings("unchecked")
+    static void requirePackageComplete(Map<String, Object> pkg, String sitting) {
+        for (String field : List.of("examDate", "startTime", "subjectCode", "subjectName", "departmentCode", "cycleName")) {
+            Object v = pkg.get(field);
+            packageCheck(v != null && !String.valueOf(v).isBlank(), sitting, field + " is missing");
+        }
+        try {
+            LocalDate.parse(String.valueOf(pkg.get("examDate")).trim());
+        } catch (DateTimeException e) {
+            packageCheck(false, sitting, "examDate '" + pkg.get("examDate") + "' is not a date (YYYY-MM-DD)");
+        }
+        try {
+            String t = String.valueOf(pkg.get("startTime")).trim();
+            LocalTime.parse(t.length() == 5 ? t + ":00" : t);
+        } catch (DateTimeException e) {
+            packageCheck(false, sitting, "startTime '" + pkg.get("startTime") + "' is not a time (HH:MM or HH:MM:SS)");
+        }
+        for (String field : List.of("durationMinutes", "semester")) {
+            packageCheck(pkg.get(field) instanceof Number n && n.intValue() > 0, sitting, field + " is missing or zero");
+        }
+
+        List<Map<String, Object>> roster = (List<Map<String, Object>>) pkg.get("roster");
+        packageCheck(roster != null && !roster.isEmpty(), sitting, "the student roster is empty");
+        int row = 0;
+        for (Map<String, Object> student : roster) {
+            row++;
+            for (String field : List.of("usn", "fullName", "dob")) {
+                Object v = student.get(field);
+                packageCheck(v != null && !String.valueOf(v).isBlank(), sitting, "roster entry " + row + " (" + student.get("usn") + ") has no " + field);
+            }
+        }
+
+        Map<String, List<Map<String, Object>>> versions = (Map<String, List<Map<String, Object>>>) pkg.get("versions");
+        Map<String, Object> answerKeys = (Map<String, Object>) pkg.get("answerKeys");
+        packageCheck(versions != null && !versions.isEmpty(), sitting, "the question set is empty");
+        for (Map.Entry<String, List<Map<String, Object>>> version : versions.entrySet()) {
+            packageCheck(!version.getValue().isEmpty(), sitting, "version " + version.getKey() + " has no questions");
+            for (Map<String, Object> q : version.getValue()) {
+                String where = "version " + version.getKey() + " question " + q.get("position");
+                for (String field : List.of("questionUid", "prompt")) {
+                    Object v = q.get(field);
+                    packageCheck(v != null && !String.valueOf(v).isBlank(), sitting, where + " has no " + field);
+                }
+                packageCheck(q.get("options") instanceof List<?> o && !o.isEmpty()
+                        && o.stream().noneMatch(x -> x == null || String.valueOf(x).isBlank()), sitting, where + " has a missing option");
+                packageCheck(answerKeys != null && answerKeys.get(q.get("questionUid") + ":" + version.getKey()) != null, sitting, where + " has no answer key");
+            }
+        }
+    }
+
+    private static void packageCheck(boolean ok, String sitting, String problem) {
+        check(ok, 400, "Package not sent: " + problem + " for " + sitting + ". Nothing was sent to the Lab Server.");
     }
 
     static String processLabServerReceptionAndAck(
