@@ -69,6 +69,11 @@ export const StudentLoginPage: React.FC = () => {
 
   // In-Console Recovery & Re-Login Dashboard State (Accessible ONLY with Instructor credentials)
   const [showInConsoleRecoveryModal, setShowInConsoleRecoveryModal] = useState<boolean>(false);
+  const [showInvigilatorSignIn, setShowInvigilatorSignIn] = useState<boolean>(false);
+  const [invigilatorId, setInvigilatorId] = useState<string>('');
+  const [invigilatorPassword, setInvigilatorPassword] = useState<string>('');
+  const [invigilatorError, setInvigilatorError] = useState<string | null>(null);
+  const [invigilatorLoading, setInvigilatorLoading] = useState<boolean>(false);
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -83,50 +88,6 @@ export const StudentLoginPage: React.FC = () => {
 
     const trimmedUsn = usn.trim();
     const rawDob = dateOfBirth.trim();
-
-    // 1. COE INVIGILATOR / EMERGENCY RECOVERY LOGIN
-    // Controlled by central COE portal, authenticated through terminal student login form only
-    if (emergencyRecoveryService.isInstructorCredentialId(trimmedUsn)) {
-      if (!rawDob) {
-        setDobError('Password / Access Key is required for COE Invigilator.');
-        return;
-      }
-
-      setIsLoading(true);
-      try {
-        await emergencyRecoveryService.loginInstructor({
-          recoveryId: trimmedUsn,
-          recoveryKey: rawDob,
-        });
-
-        // Request Fullscreen Mode immediately when entering COE Console
-        if (
-          typeof document !== 'undefined' &&
-          !document.fullscreenElement &&
-          document.documentElement?.requestFullscreen
-        ) {
-          document.documentElement.requestFullscreen().catch(() => {});
-        }
-
-        // Open the In-Console Recovery Manager directly in the terminal
-        setShowInConsoleRecoveryModal(true);
-        setUsn('');
-        setDateOfBirth('');
-        setUsnError(null);
-        setDobError(null);
-        setAuthError(null);
-        return;
-      } catch (err) {
-        setAuthError(
-          err instanceof Error
-            ? err.message
-            : 'Authentication failed: Invalid credentials.'
-        );
-        return;
-      } finally {
-        setIsLoading(false);
-      }
-    }
 
     // 2. NORMAL STUDENT LOGIN
     const uErr = validateUsnInput(trimmedUsn);
@@ -171,6 +132,35 @@ export const StudentLoginPage: React.FC = () => {
       );
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const closeInvigilatorSignIn = () => {
+    setShowInvigilatorSignIn(false);
+    setInvigilatorId('');
+    setInvigilatorPassword('');
+    setInvigilatorError(null);
+  };
+
+  const handleInvigilatorSignIn = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!invigilatorId.trim() || !invigilatorPassword) {
+      setInvigilatorError('Enter the instructor ID and password.');
+      return;
+    }
+    setInvigilatorLoading(true);
+    setInvigilatorError(null);
+    try {
+      await emergencyRecoveryService.loginInstructor({
+        recoveryId: invigilatorId,
+        recoveryKey: invigilatorPassword,
+      });
+      closeInvigilatorSignIn();
+      setShowInConsoleRecoveryModal(true);
+    } catch (err) {
+      setInvigilatorError(err instanceof Error ? err.message : 'Invigilator sign-in failed.');
+    } finally {
+      setInvigilatorLoading(false);
     }
   };
 
@@ -255,7 +245,7 @@ export const StudentLoginPage: React.FC = () => {
             )}
 
             <form onSubmit={handleFormSubmit} noValidate className="space-y-[18px] text-left">
-            {/* Field 1: USN or Emergency Recovery ID */}
+            {/* Field 1: USN */}
             <div>
               <label
                 htmlFor="student-usn"
@@ -291,7 +281,7 @@ export const StudentLoginPage: React.FC = () => {
               )}
             </div>
 
-            {/* Field 2: Dual-Mode Date of Birth / Recovery Key */}
+            {/* Field 2: Date of Birth */}
             <div>
               <label
                 htmlFor="student-dob"
@@ -376,6 +366,14 @@ export const StudentLoginPage: React.FC = () => {
               </button>
             </div>
           </form>
+
+            <button
+              type="button"
+              onClick={() => setShowInvigilatorSignIn(true)}
+              className="w-full text-[13px] font-semibold text-[#2463B5] hover:underline underline-offset-2 cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#2463B5] rounded-[6px]"
+            >
+              Invigilator sign-in
+            </button>
         </div>
       </div>
     </main>
@@ -396,6 +394,75 @@ export const StudentLoginPage: React.FC = () => {
           </div>
         </div>
       </footer>
+
+      {showInvigilatorSignIn && (
+        <div
+          className="fixed inset-0 z-[9999] bg-[#102A43]/60 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="invigilator-signin-title"
+        >
+          <form
+            onSubmit={handleInvigilatorSignIn}
+            noValidate
+            className="w-full max-w-[380px] bg-white border border-[#CBD5E1] rounded-[10px] shadow-[0_10px_30px_rgba(16,42,67,0.15)] p-6 space-y-4 text-left"
+          >
+            <h2 id="invigilator-signin-title" className="text-[18px] font-bold text-[#102A43]">
+              Invigilator sign-in
+            </h2>
+            {invigilatorError && (
+              <p className="text-xs text-[#B42318] font-medium" role="alert">
+                {invigilatorError}
+              </p>
+            )}
+            <div>
+              <label htmlFor="invigilator-id" className="block text-[13px] font-semibold text-[#243B53] mb-1.5">
+                Instructor ID
+              </label>
+              <input
+                id="invigilator-id"
+                type="text"
+                value={invigilatorId}
+                onChange={(e) => setInvigilatorId(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+                autoFocus
+                className="h-[43px] w-full px-3.5 rounded-[6px] border border-[#CBD5E1] text-sm bg-white text-[#243247] focus:outline-none focus:ring-2 focus:ring-[#2463B5] focus:border-[#2463B5]"
+              />
+            </div>
+            <div>
+              <label htmlFor="invigilator-password" className="block text-[13px] font-semibold text-[#243B53] mb-1.5">
+                Password
+              </label>
+              <input
+                id="invigilator-password"
+                type="password"
+                value={invigilatorPassword}
+                onChange={(e) => setInvigilatorPassword(e.target.value)}
+                autoComplete="off"
+                className="h-[43px] w-full px-3.5 rounded-[6px] border border-[#CBD5E1] text-sm bg-white text-[#243247] focus:outline-none focus:ring-2 focus:ring-[#2463B5] focus:border-[#2463B5]"
+              />
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={closeInvigilatorSignIn}
+                className="flex-1 h-[40px] rounded-[6px] border border-[#CBD5E1] bg-white text-[#243247] font-semibold text-[13px] hover:bg-[#F7F9FC] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={invigilatorLoading}
+                className="flex-1 h-[40px] rounded-[6px] bg-[#2463B5] hover:bg-[#194F96] text-white font-bold text-[13px] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {invigilatorLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>Sign in</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* IN-CONSOLE EMERGENCY RECOVERY & RE-LOGIN OVERLAY (Accessible ONLY by Instructor) */}
       {showInConsoleRecoveryModal && (

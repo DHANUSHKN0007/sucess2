@@ -17,7 +17,7 @@ shown with the prefix stripped. `{x}` is one path segment.
 | STUDENT | POST | `security/violation` | student session token; body `studentUsn` is ignored |
 | STUDENT (recovery) | POST | `recovery/relogin-authorisations/consume`, `recovery/consume-token` | none of its own — see below |
 | STUDENT PC (invigilator) | POST | `security/unlock`, `labs/{x}/sittings/{x}/verify-unlock` | invigilator unlock password, checked against the sitting's PBKDF2 verifier provisioned by central |
-| INSTRUCTOR | POST | `instructor/login`, `recovery/login` | recovery ID + key (credential exchange) |
+| INSTRUCTOR | POST | `instructor/login`, `recovery/login` | `LAB_INSTRUCTOR_USERNAME` + password checked against `LAB_INSTRUCTOR_PASSWORD_HASH` (credential exchange) |
 | INSTRUCTOR | POST | `instructor/logout`, `recovery/logout` | none needed; removes the presented token |
 | INSTRUCTOR | GET | `recovery/relogin-authorisations`, `recovery/overview`, `recovery/transfers`, `recovery/audit-logs`, `recovery/config`, `package/list` | `requireInstructor` |
 | INSTRUCTOR | POST | `recovery/relogin-authorisations/approve`, `recovery/report-crash`, `package/manual-import`, `packages/activate`, `package/activate`, `results/transfer-to-central` | `requireInstructor` |
@@ -33,6 +33,16 @@ shown with the prefix stripped. `{x}` is one path segment.
 
 `requireInstructor` accepts only a token issued by `instructor/login`: 128-bit
 `SecureRandom`, held in memory for 8 hours (a server restart logs every instructor out).
+
+There is no built-in instructor account, in any mode. `instructor/login` returns 503
+`INSTRUCTOR_LOGIN_NOT_CONFIGURED` until both `LAB_INSTRUCTOR_*` variables are set. Create
+the hash with `deploy/make-instructor-credential.ps1 [-Password <pw>]` or
+`deploy/make-instructor-credential.sh [pw]`; with no password they generate a strong one
+and print it once. Failed logins are limited to 5 per 60 s per workstation ID (then 429
+`INSTRUCTOR_LOGIN_RATE_LIMITED`), and every failure in the last 60 s anywhere adds 1 s to
+each later attempt, up to 30 s. The workstation ID is client-supplied; the gateway can
+later supply a trusted client address at the `PART B HOOK` in `LabServer.java`.
+Test suites read the account from `LAB_INSTRUCTOR_USERNAME` / `LAB_INSTRUCTOR_PASSWORD`.
 
 `requireLocalStaff` returns 403 `STAFF_ROUTE_LOCAL_ONLY` when the request carries an
 `X-Gateway-Origin` header, or when the caller is neither loopback nor one of this host's
@@ -61,3 +71,5 @@ would pass the locality check.
 | `PORT` / `LAB_PORT` | `8082` | Listen port. |
 | `LAB_TEST_MODE` | `false` | `true` honours `X-Simulated-Time-Ms`, `X-Effective-Time-Ms`, `simulatedTimestampMs`, `effectiveTimeMs`, `X-Bypass-Start-Check` and `forceStart`, and enables `test/*`. Never set it for a real examination. |
 | `LAB_STAFF_ALLOW_REMOTE` | `false` | `true` lets non-local callers use the LOCAL STAFF routes. |
+| `LAB_INSTRUCTOR_USERNAME` | unset | Instructor login name (case-insensitive). |
+| `LAB_INSTRUCTOR_PASSWORD_HASH` | unset | `<saltHex>:<hashHex>`, PBKDF2-HMAC-SHA256, 600000 iterations, 32-byte hash. |

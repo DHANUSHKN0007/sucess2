@@ -41,6 +41,12 @@ public final class LabServer {
 
     public static final SecureRandom RANDOM = new SecureRandom();
     private static final long INSTRUCTOR_TOKEN_TTL_MS = 8L * 60 * 60 * 1000;
+    // Instructor login stays disabled (503) unless both LAB_INSTRUCTOR_* variables are set and valid.
+    private static String INSTRUCTOR_USERNAME;
+    private static byte[] INSTRUCTOR_SALT;
+    private static byte[] INSTRUCTOR_HASH;
+    private static final Map<String, ConcurrentLinkedDeque<Long>> INSTRUCTOR_FAILURES_BY_SOURCE = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedDeque<Long> INSTRUCTOR_FAILURES_GLOBAL = new ConcurrentLinkedDeque<>();
     public static final ZoneId IST_ZONE = ZoneId.of("Asia/Kolkata");
     public static String LAB_ID = "LAB-CSE-01";
     public static int PORT = 8082;
@@ -121,6 +127,7 @@ public final class LabServer {
             System.out.println("#  Client-supplied clock, start-check bypass and /test/* routes are ENABLED.   #");
             System.out.println("################################################################################");
         }
+        loadInstructorCredential(System.getenv("LAB_INSTRUCTOR_USERNAME"), System.getenv("LAB_INSTRUCTOR_PASSWORD_HASH"));
         LAB_STAFF_ALLOW_REMOTE = Boolean.parseBoolean(System.getenv().getOrDefault("LAB_STAFF_ALLOW_REMOTE", "false"));
         if (LAB_STAFF_ALLOW_REMOTE) {
             System.out.println("[LabServer] WARNING: LAB_STAFF_ALLOW_REMOTE=true -- unauthenticated staff routes accept non-local callers.");
@@ -2882,14 +2889,62 @@ public final class LabServer {
     }
 
     // --- PHASE 9: LAB INSTRUCTOR AUTHENTICATION ---
-    private static String handleInstructorLogin(HttpExchange exchange, Map<String, Object> form) throws Exception {
-        String recId = String.valueOf(form.getOrDefault("recoveryId", form.getOrDefault("id", form.getOrDefault("username", "")))).trim();
-        String recKey = String.valueOf(form.getOrDefault("recoveryKey", form.getOrDefault("password", ""))).trim();
+    // LAB_INSTRUCTOR_PASSWORD_HASH is "<saltHex>:<hashHex>", PBKDF2-HMAC-SHA256 via derive(); see deploy/make-instructor-credential.*
+    private static void loadInstructorCredential(String username, String hashLine) {
+        if (username == null || username.isBlank() || hashLine == null || hashLine.isBlank()) {
+            System.out.println("[LabServer] LAB_INSTRUCTOR_USERNAME / LAB_INSTRUCTOR_PASSWORD_HASH not set -- instructor login is DISABLED.");
+            return;
+        }
+        String[] parts = hashLine.trim().split(":");
+        try {
+            byte[] salt = HexFormat.of().parseHex(parts[0]);
+            byte[] hash = HexFormat.of().parseHex(parts.length == 2 ? parts[1] : "");
+            if (salt.length < 16 || hash.length != 32) throw new IllegalArgumentException();
+            INSTRUCTOR_SALT = salt;
+            INSTRUCTOR_HASH = hash;
+            INSTRUCTOR_USERNAME = username.trim();
+        } catch (IllegalArgumentException e) {
+            System.out.println("[LabServer] LAB_INSTRUCTOR_PASSWORD_HASH is not '<saltHex>:<hashHex>' -- instructor login is DISABLED.");
+        }
+    }
 
-        boolean valid = (recId.equalsIgnoreCase("EMGR-LOGIN-01") && recKey.equals("ProTick-0011")) ||
-                        (recId.equalsIgnoreCase("lab") && recKey.equals("lab@123"));
-        if (!valid) {
-            throw new LabException(401, "Invalid Lab Instructor Emergency Recovery Credentials. Access Denied.", "INVALID_CREDENTIALS");
+    // PART B HOOK: failures are keyed on the client-supplied workstation ID because every request behind the
+    // gateway shares one source address. When the gateway forwards a trusted client address, add it to this key.
+    private static String instructorLoginSourceKey(HttpExchange exchange, Map<String, Object> form) {
+        Object ws = form.get("workstationId");
+        return ws == null || String.valueOf(ws).isBlank() ? "UNKNOWN-WORKSTATION" : String.valueOf(ws).trim().toUpperCase(Locale.ROOT);
+    }
+
+    private static int recentInstructorFailures(ConcurrentLinkedDeque<Long> failures, long now) {
+        Long oldest;
+        while ((oldest = failures.peekFirst()) != null && now - oldest >= 60000L) failures.pollFirst();
+        return failures.size();
+    }
+
+    private static String handleInstructorLogin(HttpExchange exchange, Map<String, Object> form) throws Exception {
+        if (INSTRUCTOR_USERNAME == null) {
+            throw new LabException(503, "Lab Instructor login is not configured on this server. Ask the administrator to set LAB_INSTRUCTOR_USERNAME and LAB_INSTRUCTOR_PASSWORD_HASH.", "INSTRUCTOR_LOGIN_NOT_CONFIGURED");
+        }
+        long now = System.currentTimeMillis();
+        ConcurrentLinkedDeque<Long> sourceFailures = INSTRUCTOR_FAILURES_BY_SOURCE.computeIfAbsent(instructorLoginSourceKey(exchange, form), k -> new ConcurrentLinkedDeque<>());
+        if (recentInstructorFailures(sourceFailures, now) >= 5) {
+            throw new LabException(429, "Too many failed instructor sign-in attempts from this workstation. Try again in a minute.", "INSTRUCTOR_LOGIN_RATE_LIMITED");
+        }
+        // Each recent failure anywhere slows every attempt by a second (max 30 s): guessing gets slow, but a
+        // student hammering the form can never lock invigilators out completely.
+        long delayMs = Math.min(recentInstructorFailures(INSTRUCTOR_FAILURES_GLOBAL, now) * 1000L, 30000L);
+        if (delayMs > 0) Thread.sleep(delayMs);
+
+        String recId = String.valueOf(form.getOrDefault("recoveryId", form.getOrDefault("id", form.getOrDefault("username", "")))).trim();
+        String recKey = String.valueOf(form.getOrDefault("recoveryKey", form.getOrDefault("password", "")));
+        boolean userOk = MessageDigest.isEqual(recId.toLowerCase(Locale.ROOT).getBytes(StandardCharsets.UTF_8),
+                INSTRUCTOR_USERNAME.toLowerCase(Locale.ROOT).getBytes(StandardCharsets.UTF_8));
+        boolean passOk = MessageDigest.isEqual(derive(recKey, INSTRUCTOR_SALT), INSTRUCTOR_HASH);
+        if (!(userOk & passOk)) {
+            long failedAt = System.currentTimeMillis();
+            sourceFailures.addLast(failedAt);
+            INSTRUCTOR_FAILURES_GLOBAL.addLast(failedAt);
+            throw new LabException(401, "Invalid Lab Instructor credentials. Access denied.", "INVALID_CREDENTIALS");
         }
         byte[] tokenBytes = new byte[16];
         RANDOM.nextBytes(tokenBytes);
@@ -2899,7 +2954,7 @@ public final class LabServer {
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("authenticated", true);
         resp.put("token", token);
-        resp.put("instructor", Map.of("recoveryId", recId.toUpperCase(Locale.ROOT), "name", "COE Emergency Recovery Invigilator"));
+        resp.put("instructor", Map.of("recoveryId", INSTRUCTOR_USERNAME, "name", "COE Emergency Recovery Invigilator"));
         return Json.stringify(resp);
     }
 
@@ -3034,7 +3089,7 @@ public final class LabServer {
             }
         }
 
-        String instructorId = String.valueOf(form.getOrDefault("instructorId", "EMGR-LOGIN-01"));
+        String instructorId = String.valueOf(form.getOrDefault("instructorId", INSTRUCTOR_USERNAME));
         String oldPc = sess != null ? (String) sess.get("assignedWorkstationId") : "UNREGISTERED";
         String targetPc = String.valueOf(form.getOrDefault("targetSystemId", form.getOrDefault("newSystemId", "LAB01-PC-02")));
 
@@ -3216,8 +3271,6 @@ public final class LabServer {
     private static String handleRecoveryConfig(HttpExchange exchange) {
         Map<String, Object> cfg = new LinkedHashMap<>();
         cfg.put("enabled", true);
-        cfg.put("recoveryId", "EMGR-LOGIN-01");
-        cfg.put("recoveryKey", "ProTick-0011");
         cfg.put("lastRotatedAt", "2026-11-12T09:00:00.000Z");
         cfg.put("rotatedBy", "COE Administration (MIT Mysore)");
         return Json.stringify(cfg);

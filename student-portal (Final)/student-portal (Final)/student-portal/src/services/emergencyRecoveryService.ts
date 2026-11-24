@@ -19,17 +19,8 @@ import { workstationService } from './workstationService';
 // Shown when a recovery record carries no workstation, instead of guessing a PC the student may never have used.
 const UNREGISTERED_SYSTEM_ID = 'UNREGISTERED';
 
-// FIXED RECOVERY CREDENTIALS - EXACT AS SPECIFIED BY COE
-export const FIXED_RECOVERY_CREDENTIALS: EmergencyRecoveryCredentials = {
-  recoveryId: 'EMGR-LOGIN-01',
-  recoveryKey: 'ProTick-0011',
-};
-
-// Alternative instructor credentials for convenience
-export const LAB_INSTRUCTOR_CREDENTIALS = {
-  id: 'lab',
-  password: 'lab@123',
-};
+// Attribution for recovery records created while the lab server was unreachable.
+const OFFLINE_INSTRUCTOR_LABEL = 'Lab Instructor';
 
 const STORAGE_KEYS = {
   CONFIG: 'mitm_coe_recovery_config_v1',
@@ -65,8 +56,6 @@ function setStorageItem<T>(key: string, value: T): void {
 
 const DEFAULT_CONFIG: EmergencyRecoveryConfig = {
   enabled: true,
-  recoveryId: FIXED_RECOVERY_CREDENTIALS.recoveryId,
-  recoveryKey: FIXED_RECOVERY_CREDENTIALS.recoveryKey,
   lastRotatedAt: '2026-11-12T09:00:00.000Z',
   rotatedBy: 'COE Administration (MIT Mysore)',
 };
@@ -99,72 +88,24 @@ export const emergencyRecoveryService = {
     workstationService.setWorkstationId(systemId);
   },
 
-  isInstructorCredentialId(id: string): boolean {
-    const normalized = id.trim().toUpperCase();
-    return (
-      normalized === FIXED_RECOVERY_CREDENTIALS.recoveryId ||
-      id.trim().toLowerCase() === LAB_INSTRUCTOR_CREDENTIALS.id
-    );
-  },
-
   async loginInstructor(credentials: EmergencyRecoveryCredentials): Promise<{
     authenticated: boolean;
     token: string;
     instructor: { recoveryId: string; name: string };
   }> {
-    const normalizedId = credentials.recoveryId.trim().toUpperCase();
-    const normalizedKey = credentials.recoveryKey.trim();
-
-    // 1. Try real backend endpoint first
-    try {
-      const res = await apiClient.post<{
-        authenticated: boolean;
-        token: string;
-        instructor: { recoveryId: string; name: string };
-      }>('/api/instructor/login', {
-        recoveryId: normalizedId,
-        recoveryKey: normalizedKey,
-      });
-
-      if (res.authenticated && res.token) {
-        sessionStorage.setItem(STORAGE_KEYS.INSTRUCTOR_TOKEN, res.token);
-        localStorage.setItem(STORAGE_KEYS.INSTRUCTOR_TOKEN, res.token);
-        return res;
-      }
-    } catch {
-      // Backend is unreachable; fallback to offline verification for lab continuity
-    }
-
-    // 2. Offline fallback verification
-    const config = this.getLocalCoeConfig();
-    const isValidFixed =
-      normalizedId === FIXED_RECOVERY_CREDENTIALS.recoveryId &&
-      normalizedKey === FIXED_RECOVERY_CREDENTIALS.recoveryKey;
-    const isValidConfigured =
-      normalizedId === config.recoveryId.toUpperCase() &&
-      normalizedKey === config.recoveryKey;
-    const isValidAlt =
-      credentials.recoveryId.trim().toLowerCase() === LAB_INSTRUCTOR_CREDENTIALS.id &&
-      credentials.recoveryKey.trim() === LAB_INSTRUCTOR_CREDENTIALS.password;
-
-    if (!isValidFixed && !isValidConfigured && !isValidAlt) {
-      throw new Error(
-        'Invalid COE Emergency Recovery Credentials. Access Denied by Security Subsystem.'
-      );
-    }
-
-    const token = `INSTR-AUTH-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    sessionStorage.setItem(STORAGE_KEYS.INSTRUCTOR_TOKEN, token);
-    localStorage.setItem(STORAGE_KEYS.INSTRUCTOR_TOKEN, token);
-
-    return {
-      authenticated: true,
-      token,
-      instructor: {
-        recoveryId: normalizedId,
-        name: 'COE Emergency Recovery Invigilator',
-      },
-    };
+    // Only the lab server can verify an instructor; there is no offline sign-in.
+    const res = await apiClient.post<{
+      authenticated: boolean;
+      token: string;
+      instructor: { recoveryId: string; name: string };
+    }>('/api/instructor/login', {
+      recoveryId: credentials.recoveryId,
+      recoveryKey: credentials.recoveryKey,
+      workstationId: workstationService.getWorkstationId(),
+    });
+    sessionStorage.setItem(STORAGE_KEYS.INSTRUCTOR_TOKEN, res.token);
+    localStorage.setItem(STORAGE_KEYS.INSTRUCTOR_TOKEN, res.token);
+    return res;
   },
 
   async logoutInstructor(): Promise<void> {
@@ -276,7 +217,6 @@ export const emergencyRecoveryService = {
       const updated: EmergencyRecoveryConfig = {
         ...current,
         ...updates,
-        lastRotatedAt: updates.recoveryKey ? new Date().toISOString() : current.lastRotatedAt,
       };
       setStorageItem(STORAGE_KEYS.CONFIG, updated);
       return updated;
@@ -433,9 +373,9 @@ export const emergencyRecoveryService = {
         UNREGISTERED_SYSTEM_ID;
 
       const instructorAuth = transfer || (reg.reloginRequestStatus === 'CONSUMED' && reloginSystemId)
-        ? `${transfer?.authorisedBy || reg.instructorAuthorisation?.split(' ')[0] || FIXED_RECOVERY_CREDENTIALS.recoveryId} (Re-logged on ${reloginSystemId})`
+        ? `${transfer?.authorisedBy || reg.instructorAuthorisation?.split(' ')[0] || OFFLINE_INSTRUCTOR_LABEL} (Re-logged on ${reloginSystemId})`
         : activeToken
-        ? `${activeToken.instructorAuthorisation || 'EMGR-LOGIN-01 (Permission Granted - Any Available PC)'}`
+        ? `${activeToken.instructorAuthorisation || `${OFFLINE_INSTRUCTOR_LABEL} (Permission Granted - Any Available PC)`}`
         : sessionStatus === 'INTERRUPTED'
         ? 'Pending Lab Instructor Review'
         : 'Verified';
@@ -503,7 +443,7 @@ export const emergencyRecoveryService = {
     const registry = this.getLoginRegistry();
     const studentName = registry[normalized]?.studentName || 'Student';
     const assignedSystemId = registry[normalized]?.assignedSystemId || UNREGISTERED_SYSTEM_ID;
-    const instructor = params.instructorId || FIXED_RECOVERY_CREDENTIALS.recoveryId;
+    const instructor = params.instructorId || OFFLINE_INSTRUCTOR_LABEL;
 
     const token: ReLoginAuthorisationToken = {
       tokenId: `REL-AUTH-2026-${normalized}-${Date.now().toString(36).toUpperCase()}`,
@@ -544,7 +484,7 @@ export const emergencyRecoveryService = {
       newSystemId,
       authorisedAt: new Date().toISOString(),
       reloginAt: new Date().toISOString(),
-      authorisedBy: FIXED_RECOVERY_CREDENTIALS.recoveryId,
+      authorisedBy: OFFLINE_INSTRUCTOR_LABEL,
       lastSavedQuestionIndex: 0,
       answersRecoveredCount: 0,
       remainingSeconds: 2700,

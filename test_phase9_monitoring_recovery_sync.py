@@ -18,6 +18,9 @@ from datetime import datetime
 
 CENTRAL_URL = "http://127.0.0.1:8081"
 LAB_URL = "http://127.0.0.1:8082"
+# The lab server has no built-in instructor account; use the one it was started with.
+INSTRUCTOR_ID = os.environ.get("LAB_INSTRUCTOR_USERNAME", "")
+INSTRUCTOR_PASSWORD = os.environ.get("LAB_INSTRUCTOR_PASSWORD", "")
 
 results_summary = []
 
@@ -91,7 +94,7 @@ def main():
 
     # Activate session 20 for test
     try:
-        _, setup_inst = json_req(f"{LAB_URL}/api/instructor/login", method="POST", data={"recoveryId": "EMGR-LOGIN-01", "recoveryKey": "ProTick-0011"})
+        _, setup_inst = json_req(f"{LAB_URL}/api/instructor/login", method="POST", data={"recoveryId": INSTRUCTOR_ID, "recoveryKey": INSTRUCTOR_PASSWORD})
         http_req(f"{LAB_URL}/lab-api/packages/activate", method="POST", data={"examinationId": 20}, headers={"Authorization": f"Bearer {setup_inst.get('token')}"})
     except Exception as e:
         print(f"Notice: activate-package error: {e}")
@@ -228,8 +231,8 @@ def main():
 
     # 9. Valid Lab Instructor authentication
     code, inst_login_res = json_req(f"{LAB_URL}/api/instructor/login", method="POST", data={
-        "recoveryId": "EMGR-LOGIN-01",
-        "recoveryKey": "ProTick-0011"
+        "recoveryId": INSTRUCTOR_ID,
+        "recoveryKey": INSTRUCTOR_PASSWORD
     })
     t9_pass = code == 200 and isinstance(inst_login_res, dict) and inst_login_res.get("authenticated") is True
     inst_token = inst_login_res.get("token") if t9_pass else None
@@ -237,7 +240,7 @@ def main():
 
     # 10. Unauthorized role rejected
     code, bad_login_res = json_req(f"{LAB_URL}/api/instructor/login", method="POST", data={
-        "recoveryId": "EMGR-LOGIN-01",
+        "recoveryId": INSTRUCTOR_ID,
         "recoveryKey": "WrongKey999"
     })
     t10_pass = code in [401, 403]

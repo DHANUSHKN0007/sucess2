@@ -2,14 +2,22 @@
 Lab server lockdown checks. Run against a lab server started WITHOUT LAB_TEST_MODE
 (the production default) on 127.0.0.1:8082, with an active exam whose roster contains
 4MH21CS003 / 2004-01-03 (the same roster the Phase 8 suite uses).
+
+Set LAB_INSTRUCTOR_USERNAME and LAB_INSTRUCTOR_PASSWORD to the instructor account the
+server was started with. Leave them unset to check a server started without one (login
+must then be disabled). Takes ~20 s because failed instructor logins slow later attempts.
 """
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
 LAB = "http://127.0.0.1:8082/api"
+INSTRUCTOR_ID = os.environ.get("LAB_INSTRUCTOR_USERNAME", "")
+INSTRUCTOR_PASSWORD = os.environ.get("LAB_INSTRUCTOR_PASSWORD", "")
+OLD_BUILT_IN_LOGINS = [("lab", "lab@123"), ("EMGR-LOGIN-01", "ProTick-0011")]
 results = []
 
 
@@ -17,7 +25,7 @@ def call(method, path, data=None, headers=None):
     req = urllib.request.Request(f"{LAB}/{path}", method=method, headers={"Content-Type": "application/json", **(headers or {})},
                                  data=json.dumps(data).encode() if data is not None else None)
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=40) as r:
             return r.status, json.loads(r.read().decode() or "{}")
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read().decode() or "{}")
@@ -55,14 +63,19 @@ def main():
     code, _ = call("GET", "package/list", headers=forged_instr)
     check("Forged INSTR-AUTH token rejected on package/list", code == 401, f"HTTP {code}")
 
-    # Issued instructor tokens work until logout.
-    code, inst = call("POST", "instructor/login", {"recoveryId": "lab", "recoveryKey": "lab@123"})
-    auth = {"Authorization": f"Bearer {inst.get('token')}"}
-    code, _ = call("GET", "package/list", headers=auth)
-    check("Issued instructor token accepted", code == 200, f"HTTP {code}")
-    call("POST", "instructor/logout", headers=auth)
-    code, _ = call("GET", "package/list", headers=auth)
-    check("Instructor token rejected after logout", code == 401, f"HTTP {code}")
+    if INSTRUCTOR_ID and INSTRUCTOR_PASSWORD:
+        # Issued instructor tokens work until logout.
+        code, inst = call("POST", "instructor/login", {"recoveryId": INSTRUCTOR_ID, "recoveryKey": INSTRUCTOR_PASSWORD, "workstationId": "LOCKDOWN-B"})
+        auth = {"Authorization": f"Bearer {inst.get('token')}"}
+        code, _ = call("GET", "package/list", headers=auth)
+        check("Issued instructor token accepted", code == 200, f"HTTP {code}")
+        call("POST", "instructor/logout", headers=auth)
+        code, _ = call("GET", "package/list", headers=auth)
+        check("Instructor token rejected after logout", code == 401, f"HTTP {code}")
+    else:
+        for user, password in OLD_BUILT_IN_LOGINS:
+            code, body = call("POST", "instructor/login", {"recoveryId": user, "recoveryKey": password})
+            check(f"No instructor account configured: {user} refused", code == 503 and body.get("errorCode") == "INSTRUCTOR_LOGIN_NOT_CONFIGURED", f"HTTP {code}, {body.get('errorCode')}")
 
     # Staff routes refuse anything the gateway forwarded.
     code, body = call("GET", "monitoring/sessions", headers={"X-Gateway-Origin": "gateway"})
@@ -71,6 +84,22 @@ def main():
     # Violations need a student session; a body studentUsn alone is not enough.
     code, _ = call("POST", "security/violation", {"studentUsn": "4MH21CS003", "violationType": "TAB_SWITCH", "label": "Tab"})
     check("Violation without session rejected", code == 401, f"HTTP {code}")
+
+    if INSTRUCTOR_ID and INSTRUCTOR_PASSWORD:
+        # Old built-in logins are gone. These and the next three failures all come from workstation A.
+        for user, password in OLD_BUILT_IN_LOGINS:
+            code, _ = call("POST", "instructor/login", {"recoveryId": user, "recoveryKey": password, "workstationId": "LOCKDOWN-A"})
+            check(f"Old built-in login {user} rejected", code == 401, f"HTTP {code}")
+        for _ in range(3):
+            code, _ = call("POST", "instructor/login", {"recoveryId": INSTRUCTOR_ID, "recoveryKey": "wrong-password", "workstationId": "LOCKDOWN-A"})
+        check("Wrong instructor password rejected", code == 401, f"HTTP {code}")
+        code, body = call("POST", "instructor/login", {"recoveryId": INSTRUCTOR_ID, "recoveryKey": INSTRUCTOR_PASSWORD, "workstationId": "LOCKDOWN-A"})
+        check("6th attempt from same workstation rate-limited", code == 429 and body.get("errorCode") == "INSTRUCTOR_LOGIN_RATE_LIMITED", f"HTTP {code}")
+        # Another workstation is not locked out, only slowed by the five recent failures.
+        started = time.time()
+        code, _ = call("POST", "instructor/login", {"recoveryId": INSTRUCTOR_ID, "recoveryKey": INSTRUCTOR_PASSWORD, "workstationId": "LOCKDOWN-B"})
+        waited = time.time() - started
+        check("Other workstation signs in after a delay", code == 200 and waited >= 4, f"HTTP {code}, waited {waited:.1f}s")
 
     passed = sum(results)
     print(f"\nLOCKDOWN RESULTS: {passed} PASSED / {len(results) - passed} FAILED")

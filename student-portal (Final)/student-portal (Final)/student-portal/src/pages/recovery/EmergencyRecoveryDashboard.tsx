@@ -34,10 +34,7 @@ import { InstitutionHeader } from '../../components/layout/InstitutionHeader';
 import { EmptyState } from '../../components/common/EmptyState';
 import { ErrorState } from '../../components/common/ErrorState';
 import { LoadingState } from '../../components/common/LoadingState';
-import {
-  emergencyRecoveryService,
-  FIXED_RECOVERY_CREDENTIALS,
-} from '../../services/emergencyRecoveryService';
+import { emergencyRecoveryService } from '../../services/emergencyRecoveryService';
 import {
   EmergencyRecoveryConfig,
   RecoveryAuditLog,
@@ -81,8 +78,6 @@ export const EmergencyRecoveryDashboard: React.FC<EmergencyRecoveryDashboardProp
   const [auditLogs, setAuditLogs] = useState<RecoveryAuditLog[]>([]);
   const [coeConfig, setCoeConfig] = useState<EmergencyRecoveryConfig>({
     enabled: true,
-    recoveryId: FIXED_RECOVERY_CREDENTIALS.recoveryId,
-    recoveryKey: FIXED_RECOVERY_CREDENTIALS.recoveryKey,
   });
   const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -248,7 +243,7 @@ export const EmergencyRecoveryDashboard: React.FC<EmergencyRecoveryDashboardProp
           <div className="flex items-center gap-3 sm:gap-4">
             <div className="hidden md:flex items-center gap-2 text-xs sm:text-sm font-bold text-[#102A43] bg-white border border-[#CBD5E1] shadow-xs px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-[8px]">
               <ShieldCheck className="w-4 h-4 sm:w-5 sm:h-5 text-[#2463B5]" />
-              <span>Instructor ID: {FIXED_RECOVERY_CREDENTIALS.recoveryId}</span>
+              <span>Lab Instructor signed in</span>
             </div>
 
             <button
@@ -1014,18 +1009,6 @@ export const EmergencyRecoveryDashboard: React.FC<EmergencyRecoveryDashboardProp
                 </div>
 
                 <div className="p-3.5 rounded-[6px] bg-[#F7F9FC] border border-[#DCE3EC] text-xs space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[#64748B]">Configured Recovery ID:</span>
-                    <span className="font-mono font-bold text-[#102A43]">
-                      {FIXED_RECOVERY_CREDENTIALS.recoveryId}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[#64748B]">Configured Recovery Key:</span>
-                    <span className="font-mono font-bold text-[#2463B5]">
-                      {FIXED_RECOVERY_CREDENTIALS.recoveryKey}
-                    </span>
-                  </div>
                   <div className="flex items-center justify-between">
                     <span className="text-[#64748B]">One-Time Token Window:</span>
                     <span className="font-mono text-[#243247]">15 Minutes per Token</span>

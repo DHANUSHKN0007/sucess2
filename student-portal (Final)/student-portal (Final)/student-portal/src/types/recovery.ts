@@ -17,8 +17,6 @@ export interface EmergencyRecoveryCredentials {
 
 export interface EmergencyRecoveryConfig {
   enabled: boolean;
-  recoveryId: string;
-  recoveryKey: string;
   lastRotatedAt?: string;
   rotatedBy?: string;
 }
@@ -34,7 +32,7 @@ export interface ReLoginAuthorisationToken {
   targetSystemId: string;
   examinationSessionStatus: 'ACTIVE' | 'INTERRUPTED' | 'LOCKED' | 'COMPLETED';
   reloginRequestStatus: 'PENDING_APPROVAL' | 'APPROVED' | 'CONSUMED' | 'EXPIRED';
-  instructorAuthorisation: string; // e.g. "EMGR-LOGIN-01 (Lab Instructor)"
+  instructorAuthorisation: string; // e.g. "<instructor ID> (Lab Instructor)"
   reason: string; // e.g. "Terminal Hardware Crash on LAB01-PC-03"
   authorisedAt: string;
   expiresAt: string;
