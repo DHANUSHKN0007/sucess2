@@ -267,9 +267,6 @@ router.post('/auth/login', async (req, res) => {
     if (user.password_hash.startsWith('$2')) {
       match = await bcrypt.compare(password, user.password_hash);
     }
-    if (!match && password === user.password_hash) {
-      match = true;
-    }
 
     if (!match) {
       return res.status(401).json({
@@ -347,9 +344,6 @@ router.post('/auth/coe/login', async (req, res) => {
     let match = false;
     if (user.password_hash.startsWith('$2')) {
       match = await bcrypt.compare(password, user.password_hash);
-    }
-    if (!match && password === user.password_hash) {
-      match = true;
     }
 
     if (!match) {
