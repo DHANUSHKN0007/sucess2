@@ -827,7 +827,7 @@ export const SetupClassPage: React.FC = () => {
         text: res.message || `Promoted ${res.promotedCount} students from Sem ${selectedSemester} (${selectedSection}) to Sem ${selectedSemester + 1}.`,
       });
       setPromoteModalOpen(false);
-      await loadContext();
+      await loadContextAndSubjects();
       await loadSectionStudents();
     } catch (err) {
       setPromoteError(err instanceof Error ? err.message : 'Failed to promote students to next semester.');
@@ -849,7 +849,7 @@ export const SetupClassPage: React.FC = () => {
         text: res.message || `Successfully graduated ${res.graduatedCount} Semester 8 students.`,
       });
       setGraduateModalOpen(false);
-      await loadContext();
+      await loadContextAndSubjects();
       await loadSectionStudents();
     } catch (err) {
       setGraduateError(err instanceof Error ? err.message : 'Failed to graduate Semester 8 students.');
