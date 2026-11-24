@@ -74,6 +74,49 @@ function authenticateToken(req, res, next) {
   next();
 }
 
+function requireAuth(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ error: { message: 'Authentication required.', code: 'UNAUTHORIZED' } });
+  }
+  next();
+}
+
+function requireRole(allowedRoles) {
+  const roles = (Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles]).map(r => r.toUpperCase());
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: { message: 'Authentication required.', code: 'UNAUTHORIZED' } });
+    }
+    const userRole = (req.user.role || '').toUpperCase();
+    if (!roles.includes(userRole)) {
+      return res.status(403).json({ error: { message: 'Forbidden: insufficient permissions.', code: 'FORBIDDEN' } });
+    }
+    next();
+  };
+}
+
+/**
+ * Resolves department ID exclusively from verified req.user.
+ * Accepts x-hod-department-id header or query override ONLY for Principal / Admin roles.
+ * Never defaults to 'CS'.
+ */
+function resolveDepartmentId(req, res) {
+  if (!req.user) {
+    res.status(401).json({ error: { message: 'Authentication required.', code: 'UNAUTHORIZED' } });
+    return null;
+  }
+  const role = (req.user.role || '').toUpperCase();
+  let deptId = req.user.departmentId;
+  if (role === 'PRINCIPAL' || role === 'ADMIN') {
+    deptId = req.headers['x-hod-department-id'] || req.query.departmentId || req.user.departmentId;
+  }
+  if (!deptId) {
+    res.status(400).json({ error: { message: 'Department identification is required.', code: 'MISSING_DEPARTMENT' } });
+    return null;
+  }
+  return deptId;
+}
+
 app.use(authenticateToken);
 
 // Request logger
@@ -84,6 +127,13 @@ app.use((req, res, next) => {
 
 // Create Router to mount under multiple paths
 const router = express.Router();
+
+// Role-based route gatekeepers
+router.use('/principal', requireRole(['PRINCIPAL', 'ADMIN']));
+router.use('/hod', requireRole(['HOD', 'PRINCIPAL', 'ADMIN']));
+router.use('/examinations', requireRole(['COE', 'PRINCIPAL', 'HOD', 'ADMIN']));
+router.use('/results', requireRole(['COE', 'PRINCIPAL', 'HOD', 'ADMIN']));
+router.use('/monitoring', requireRole(['COE', 'PRINCIPAL', 'ADMIN']));
 
 // -----------------------------------------------------------------------------
 // 1. HEALTH CHECKS & ROOT DASHBOARD
@@ -837,7 +887,7 @@ router.get('/principal/reports/results', async (req, res) => {
 });
 
 // GET /principal/audit-logs, /hod/audit-logs, and /audit/logs (Used by all portals)
-router.get(['/principal/audit-logs', '/hod/audit-logs', '/audit/logs'], async (req, res) => {
+router.get(['/principal/audit-logs', '/hod/audit-logs', '/audit/logs'], requireRole(['PRINCIPAL', 'HOD', 'ADMIN']), async (req, res) => {
   try {
     const logsResult = await dbPool.query('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 100;');
     const deptsResult = await dbPool.query('SELECT * FROM departments ORDER BY code;');
@@ -886,11 +936,15 @@ router.get(['/principal/audit-logs', '/hod/audit-logs', '/audit/logs'], async (r
 
 // GET /hod/dashboard
 router.get('/hod/dashboard', async (req, res) => {
-  const deptId = req.headers['x-hod-department-id'] || req.user?.departmentId || 'CS';
+  const deptId = resolveDepartmentId(req, res);
+  if (!deptId) return;
 
   try {
     const deptRes = await dbPool.query('SELECT * FROM departments WHERE id = $1;', [deptId]);
-    const dept = deptRes.rows[0] || { id: 'CS', code: 'CS', name: 'Computer Science & Engineering' };
+    const dept = deptRes.rows[0];
+    if (!dept) {
+      return res.status(404).json({ error: { message: 'Department not found.', code: 'NOT_FOUND' } });
+    }
 
     const stuCount = await dbPool.query('SELECT COUNT(*) FROM students WHERE department_id = $1;', [deptId]);
     const examCount = await dbPool.query(
@@ -944,7 +998,8 @@ router.get('/hod/dashboard', async (req, res) => {
 
 // GET /hod/academic-context
 router.get('/hod/academic-context', async (req, res) => {
-  const deptId = req.headers['x-hod-department-id'] || req.user?.departmentId || 'CS';
+  const deptId = resolveDepartmentId(req, res);
+  if (!deptId) return;
   try {
     const ay = await dbPool.query("SELECT * FROM academic_years WHERE is_current = true LIMIT 1;");
     const sections = await dbPool.query(
@@ -972,7 +1027,8 @@ router.get('/hod/academic-context', async (req, res) => {
 // ⭐ CONNECTION 1: COE -> HOD (HOD reads exams scheduled by COE)
 // GET /hod/examinations
 router.get('/hod/examinations', async (req, res) => {
-  const deptId = req.headers['x-hod-department-id'] || req.user?.departmentId || 'CS';
+  const deptId = resolveDepartmentId(req, res);
+  if (!deptId) return;
   const { semesterNumber, status } = req.query;
 
   try {
@@ -1005,7 +1061,7 @@ router.get('/hod/examinations', async (req, res) => {
     const exams = result.rows.map(r => ({
       id: r.id,
       departmentId: r.department_id || deptId,
-      departmentCode: r.department_code || 'CS',
+      departmentCode: r.department_code || deptId,
       academicYearId: r.academic_year_id || 'ay-2024-25',
       semesterNumber: r.semester_number,
       subjectId: r.subject_id || r.id,
@@ -1048,7 +1104,8 @@ router.get('/hod/examinations', async (req, res) => {
 // ⭐ CONNECTION 5: COE -> HOD (HOD reads approved results)
 // GET /hod/results
 router.get('/hod/results', async (req, res) => {
-  const deptId = req.headers['x-hod-department-id'] || req.user?.departmentId || 'CS';
+  const deptId = resolveDepartmentId(req, res);
+  if (!deptId) return;
   const { semesterNumber, examinationId, section, search } = req.query;
 
   try {
@@ -1128,7 +1185,8 @@ router.get('/hod/results', async (req, res) => {
 
 // GET /hod/subjects
 router.get('/hod/subjects', async (req, res) => {
-  const deptId = req.headers['x-hod-department-id'] || req.user?.departmentId || 'CS';
+  const deptId = resolveDepartmentId(req, res);
+  if (!deptId) return;
   try {
     const result = await dbPool.query(
       `SELECT s.*, d.code as department_code
@@ -1161,7 +1219,8 @@ router.get('/hod/subjects', async (req, res) => {
 
 // POST /hod/subjects
 router.post('/hod/subjects', async (req, res) => {
-  const deptId = req.headers['x-hod-department-id'] || req.user?.departmentId || 'CS';
+  const deptId = resolveDepartmentId(req, res);
+  if (!deptId) return;
   const { code, name, semesterNumber, applicableSections } = req.body || {};
   try {
     const id = `sub-${code.toLowerCase()}-${Date.now()}`;
@@ -1189,7 +1248,8 @@ router.post('/hod/subjects', async (req, res) => {
 
 // GET /hod/student-lists
 router.get('/hod/student-lists', async (req, res) => {
-  const deptId = req.headers['x-hod-department-id'] || req.user?.departmentId || 'CS';
+  const deptId = resolveDepartmentId(req, res);
+  if (!deptId) return;
   const { semesterNumber, section } = req.query;
   try {
     let q = 'SELECT * FROM student_list_revisions WHERE department_id = $1';
@@ -1212,7 +1272,8 @@ router.get('/hod/student-lists', async (req, res) => {
 
 // POST /hod/student-lists/upload & /hod/student-lists/import (⭐ CONNECTION 2: HOD saves student list)
 router.post(['/hod/student-lists/upload', '/hod/student-lists/import'], async (req, res) => {
-  const deptId = req.headers['x-hod-department-id'] || req.user?.departmentId || 'CS';
+  const deptId = resolveDepartmentId(req, res);
+  if (!deptId) return;
   const { semesterNumber, section, rows, fileName } = req.body || {};
 
   try {
@@ -1269,7 +1330,7 @@ router.get('/hod/questions', async (req, res) => {
 });
 
 // GET /hod/key-corrections
-router.get(['/hod/key-corrections', '/results/answer-key-corrections'], async (req, res) => {
+router.get(['/hod/key-corrections', '/results/answer-key-corrections'], requireRole(['HOD', 'COE', 'PRINCIPAL', 'ADMIN']), async (req, res) => {
   try {
     const result = await dbPool.query('SELECT * FROM answer_key_corrections ORDER BY requested_at DESC;');
     res.json({ data: result.rows, success: true });
@@ -1279,7 +1340,7 @@ router.get(['/hod/key-corrections', '/results/answer-key-corrections'], async (r
 });
 
 // GET /results/answer-key-corrections/eligible-examinations
-router.get(['/results/answer-key-corrections/eligible-examinations', '/results/eligible-examinations'], async (req, res) => {
+router.get(['/results/answer-key-corrections/eligible-examinations', '/results/eligible-examinations'], requireRole(['HOD', 'COE', 'PRINCIPAL', 'ADMIN']), async (req, res) => {
   try {
     const result = await dbPool.query("SELECT id, subject_code, subject_name, semester_number, exam_date FROM examinations WHERE status = 'Exam Completed' ORDER BY exam_date DESC;");
     res.json({ data: result.rows, success: true });
@@ -1289,7 +1350,7 @@ router.get(['/results/answer-key-corrections/eligible-examinations', '/results/e
 });
 
 // GET /labs/servers and /examinations/lab-servers
-router.get(['/labs/servers', '/examinations/lab-servers'], (req, res) => {
+router.get(['/labs/servers', '/examinations/lab-servers'], requireRole(['COE', 'PRINCIPAL', 'HOD', 'ADMIN']), (req, res) => {
   const labServers = [
     {
       id: 'lab-cs-01',
@@ -1323,7 +1384,7 @@ router.get(['/labs/servers', '/examinations/lab-servers'], (req, res) => {
 });
 
 // GET & POST /hod/subjects/:subjectId/course-outcomes & /course-outcomes
-router.get(['/hod/subjects/:subjectId/course-outcomes', '/course-outcomes'], async (req, res) => {
+router.get(['/hod/subjects/:subjectId/course-outcomes', '/course-outcomes'], requireRole(['HOD', 'PRINCIPAL', 'COE', 'ADMIN']), async (req, res) => {
   try {
     const subjectId = req.params.subjectId || req.query.subjectId;
     let query = 'SELECT * FROM course_outcome_revisions';
@@ -1392,7 +1453,10 @@ router.get('/institution/semesters', async (req, res) => {
 // GET /institution/eligibility
 router.get('/institution/eligibility', async (req, res) => {
   const { departmentId, semesterId } = req.query;
-  const dept = departmentId || 'CS';
+  const dept = departmentId;
+  if (!dept) {
+    return res.status(400).json({ error: { message: 'departmentId query parameter is required.' } });
+  }
   const sem = parseInt(semesterId || '5', 10);
 
   try {
@@ -1504,6 +1568,10 @@ router.post('/examinations/schedule', async (req, res) => {
   } = req.body || {};
 
   try {
+    if (!department) {
+      return res.status(400).json({ error: { message: 'department is required.' } });
+    }
+
     let finalSubId = subjectId;
     let finalSubName = 'Examination Subject';
 
@@ -1521,7 +1589,7 @@ router.post('/examinations/schedule', async (req, res) => {
         `INSERT INTO subjects (id, code, name, department_id, semester_number, academic_year_id)
          VALUES ($1, $2, $3, $4, $5, 'ay-2024-25')
          ON CONFLICT (id) DO NOTHING;`,
-        [finalSubId, subjectCode, finalSubName, department || 'CS', semester || 5]
+        [finalSubId, subjectCode, finalSubName, department, semester || 5]
       );
     }
 
@@ -1766,7 +1834,7 @@ router.get('/monitoring/sessions', async (req, res) => {
         sessionId: m.sitting_id || m.id || `sess-${m.examination_id}`,
         examinationId: m.examination_id,
         examinationCode: m.examination_id,
-        department: m.department_id || 'CS',
+        department: m.department_id || '',
         semester: m.semester_number || 5,
         subjectCode: m.subject_code || 'CS501',
         subjectName: m.subject_name || 'Database Management Systems',
@@ -1802,7 +1870,7 @@ router.get('/monitoring/sessions', async (req, res) => {
 });
 
 // GET /labs/servers
-router.get('/labs/servers', async (req, res) => {
+router.get('/labs/servers', requireRole(['COE', 'PRINCIPAL', 'HOD', 'ADMIN']), async (req, res) => {
   try {
     const result = await dbPool.query('SELECT * FROM lab_servers WHERE is_online = true;');
     res.json({
@@ -1839,9 +1907,9 @@ router.get('/results/examinations', async (req, res) => {
         id: r.id,
         examinationId: r.examination_id,
         examinationCode: r.examination_id,
-        department: r.department_id || 'CS',
-        departmentId: r.department_id || 'CS',
-        departmentName: r.department_id === 'CS' ? 'Computer Science & Engineering' : r.department_id,
+        department: r.department_id || '',
+        departmentId: r.department_id || '',
+        departmentName: r.department_name || r.department_id || '',
         semester: r.semester_number || 5,
         subjectCode: r.subject_code,
         subjectName: r.subject_name,
