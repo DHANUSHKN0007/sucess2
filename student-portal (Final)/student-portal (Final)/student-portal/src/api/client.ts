@@ -126,13 +126,13 @@ export class ApiClient {
   /**
    * Retrieves active auth token from memory/sessionStorage.
    * Priority: Student token, then Instructor token.
+   * Student token is strictly read from sessionStorage to isolate tabs.
    */
   public getStoredToken(): string | null {
     if (typeof window === 'undefined') return null;
     try {
       return (
         sessionStorage.getItem(ACTIVE_STUDENT_TOKEN_KEY) ||
-        localStorage.getItem(ACTIVE_STUDENT_TOKEN_KEY) ||
         sessionStorage.getItem(INSTRUCTOR_TOKEN_KEY) ||
         localStorage.getItem(INSTRUCTOR_TOKEN_KEY)
       );
@@ -143,13 +143,19 @@ export class ApiClient {
 
   /**
    * The token a request must carry: instructor and recovery routes use the instructor's token and every other route
-   * the student's. Taking whichever exists first sent a signed-in student's token to /api/recovery/* on a shared PC,
-   * which the lab server refused with 401.
+   * the student's. Student session tokens are strictly scoped to sessionStorage so shared lab PCs never leak tokens
+   * across tabs or sittings.
    */
   private getTokenForUrl(url: string): string | null {
-    const key = INSTRUCTOR_ROUTE.test(url) ? INSTRUCTOR_TOKEN_KEY : ACTIVE_STUDENT_TOKEN_KEY;
+    if (INSTRUCTOR_ROUTE.test(url)) {
+      try {
+        return sessionStorage.getItem(INSTRUCTOR_TOKEN_KEY) || localStorage.getItem(INSTRUCTOR_TOKEN_KEY);
+      } catch {
+        return null;
+      }
+    }
     try {
-      return sessionStorage.getItem(key) || localStorage.getItem(key);
+      return sessionStorage.getItem(ACTIVE_STUDENT_TOKEN_KEY);
     } catch {
       return null;
     }
@@ -163,7 +169,8 @@ export class ApiClient {
         localStorage.removeItem(ACTIVE_STUDENT_TOKEN_KEY);
       } else {
         sessionStorage.setItem(ACTIVE_STUDENT_TOKEN_KEY, token);
-        localStorage.setItem(ACTIVE_STUDENT_TOKEN_KEY, token);
+        // Ensure localStorage never holds student tokens to prevent cross-tab or cross-sitting leakage
+        localStorage.removeItem(ACTIVE_STUDENT_TOKEN_KEY);
       }
     } catch {
       // Ignore quota errors
