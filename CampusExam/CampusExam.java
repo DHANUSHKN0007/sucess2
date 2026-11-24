@@ -1645,7 +1645,6 @@ public final class CampusExam {
             case "coe/session" -> createExaminationSession(db, user, form);
             case "coe/select-paper" -> selectPaperAndGenerateVersions(db, user, form);
             case "coe/finalize-session" -> finalizeExaminationSession(db, user, form);
-            case "coe/export-package" -> exportSecurePackage(db, user, form);
             case "coe/import-results" -> importLabResults(db, user, form);
             case "coe/approve-results" -> approveResults(db, user, form);
             case "coe/release-results" -> releaseResults(db, user, form);
@@ -2227,131 +2226,6 @@ public final class CampusExam {
         run(db, "UPDATE examination_session SET status='FROZEN', frozen_at=clock_timestamp() WHERE id=?", sessionId);
         audit(db, user.id(), "SESSION_FROZEN", "session:" + sessionId, "Session frozen with " + frozen + " eligible candidates.");
         return Json.stringify(Map.of("sessionId", sessionId, "status", "FROZEN", "frozenStudents", frozen));
-    }
-
-    static String exportSecurePackage(Connection db, User user, Form form) throws Exception {
-        user.require("COE", "ADMIN");
-        long sessionId = form.id("session_id");
-
-        String status = one(db, "SELECT status FROM examination_session WHERE id=? FOR UPDATE", sessionId);
-        check(status.equals("FROZEN") || status.equals("PACKAGE_EXPORTED"), 409, "Session must be FROZEN to export package");
-
-        // Build unencrypted session payload (Versions A-D + Answer Keys + Frozen Roster + Session Info)
-        Map<String, Object> packageData = new LinkedHashMap<>();
-        packageData.put("sessionId", sessionId);
-        packageData.put("packageUid", "PKG-" + sessionId + "-" + System.currentTimeMillis());
-        packageData.put("exportedAt", Instant.now().toString());
-
-        // Session Details
-        try (var st = sql(db, """
-            SELECT s.session_date, s.sitting, s.start_time, s.end_time, s.duration_minutes, s.assigned_lab,
-                   sub.code AS subject_code, sub.name AS subject_name, d.code AS dept_code
-            FROM examination_session s
-            JOIN subject sub ON sub.id=s.subject_id
-            JOIN department d ON d.id=s.department_id
-            WHERE s.id=?
-            """, sessionId); var rs = st.executeQuery()) {
-            if (rs.next()) {
-                packageData.put("sessionDate", rs.getString("session_date"));
-                packageData.put("sitting", rs.getString("sitting"));
-                packageData.put("startTime", rs.getString("start_time"));
-                packageData.put("endTime", rs.getString("end_time"));
-                packageData.put("durationMinutes", rs.getInt("duration_minutes"));
-                packageData.put("assignedLab", rs.getString("assigned_lab"));
-                packageData.put("subjectCode", rs.getString("subject_code"));
-                packageData.put("subjectName", rs.getString("subject_name"));
-                packageData.put("departmentCode", rs.getString("dept_code"));
-            }
-        }
-
-        // Versions A-D
-        Map<String, Object> versionsMap = new LinkedHashMap<>();
-        Map<String, Integer> answerKeysMap = new LinkedHashMap<>(); // Stable Question ID -> Correct Choice
-        try (var st = sql(db, """
-            SELECT v.version_letter, pq.display_position, pq.question_uid, pq.shuffled_options, pq.shuffled_correct,
-                   q.prompt, pq.marks
-            FROM paper_version v
-            JOIN paper_version_question pq ON pq.version_id=v.id
-            JOIN question_bank_item q ON q.id=pq.question_id
-            WHERE v.session_id=?
-            ORDER BY v.version_letter, pq.display_position
-            """, sessionId); var rs = st.executeQuery()) {
-            while (rs.next()) {
-                String vLetter = rs.getString("version_letter");
-                List<Map<String, Object>> vList = (List<Map<String, Object>>) versionsMap.computeIfAbsent(vLetter, k -> new ArrayList<>());
-                Map<String, Object> qItem = new LinkedHashMap<>();
-                qItem.put("position", rs.getInt("display_position"));
-                qItem.put("questionUid", rs.getString("question_uid"));
-                qItem.put("prompt", rs.getString("prompt"));
-                Array optsArr = rs.getArray("shuffled_options");
-                qItem.put("options", Arrays.asList((String[]) optsArr.getArray()));
-                qItem.put("marks", rs.getBigDecimal("marks"));
-                vList.add(qItem);
-
-                // Answer keys mapped by question_uid for evaluation
-                answerKeysMap.put(rs.getString("question_uid"), rs.getInt("shuffled_correct"));
-            }
-        }
-        packageData.put("versions", versionsMap);
-        packageData.put("answerKeys", answerKeysMap);
-
-        // Frozen Roster
-        List<Map<String, Object>> rosterList = new ArrayList<>();
-        try (var st = sql(db, "SELECT usn, full_name, date_of_birth FROM session_roster_snapshot WHERE session_id=? ORDER BY usn", sessionId);
-             var rs = st.executeQuery()) {
-            while (rs.next()) {
-                rosterList.add(Map.of(
-                    "usn", rs.getString("usn"),
-                    "full_name", rs.getString("full_name"),
-                    "date_of_birth", rs.getString("date_of_birth")
-                ));
-            }
-        }
-        packageData.put("roster", rosterList);
-
-        try (var vst = sql(db, "SELECT verifier_hash, salt, iterations FROM session_unlock_credential WHERE session_id=? AND status='Active' ORDER BY revision DESC LIMIT 1", sessionId);
-             var vrs = vst.executeQuery()) {
-            if (vrs.next()) {
-                packageData.put("sessionUnlockVerifier", Map.of(
-                        "verifierHash", vrs.getString(1),
-                        "salt", vrs.getString(2),
-                        "iterations", vrs.getInt(3)
-                ));
-            }
-        }
-
-        byte[] rawPayload = Json.stringify(packageData).getBytes(StandardCharsets.UTF_8);
-
-        // Encrypt with Lab RSA Public Key using AES-256-GCM + RSA-OAEP
-        Crypto.EncryptedEnvelope envelope = Crypto.encrypt(rawPayload, Crypto.labPublicKey);
-
-        // Central Backend Digital Signature on the envelope
-        byte[] sigData = (envelope.encryptedPayloadHex() + envelope.digestHex() + sessionId).getBytes(StandardCharsets.UTF_8);
-        String signatureHex = Crypto.sign(sigData, Crypto.centralKeys.getPrivate());
-
-        String packageUid = (String) packageData.get("packageUid");
-        run(db, """
-            INSERT INTO secure_package(session_id, package_uid, encrypted_payload, encrypted_key_hex, iv_hex, signature_hex, digest_hex, status, exported_at, exported_by)
-            VALUES(?,?,?,?,?,?,?,'EXPORTED',clock_timestamp(),?)
-            ON CONFLICT(session_id) DO UPDATE SET
-                encrypted_payload=excluded.encrypted_payload, encrypted_key_hex=excluded.encrypted_key_hex,
-                iv_hex=excluded.iv_hex, signature_hex=excluded.signature_hex, digest_hex=excluded.digest_hex,
-                status='EXPORTED', exported_at=clock_timestamp(), exported_by=excluded.exported_by
-            """, sessionId, packageUid, envelope.encryptedPayloadHex(), envelope.encryptedKeyHex(), envelope.ivHex(), signatureHex, envelope.digestHex(), user.id());
-
-        run(db, "UPDATE examination_session SET status='PACKAGE_EXPORTED' WHERE id=?", sessionId);
-        audit(db, user.id(), "PACKAGE_EXPORTED", "session:" + sessionId, "Secure encrypted and signed package exported: " + packageUid);
-
-        Map<String, Object> exportPackage = new LinkedHashMap<>();
-        exportPackage.put("packageUid", packageUid);
-        exportPackage.put("sessionId", sessionId);
-        exportPackage.put("encryptedPayload", envelope.encryptedPayloadHex());
-        exportPackage.put("encryptedKeyHex", envelope.encryptedKeyHex());
-        exportPackage.put("ivHex", envelope.ivHex());
-        exportPackage.put("digestHex", envelope.digestHex());
-        exportPackage.put("signatureHex", signatureHex);
-        exportPackage.put("centralPublicKey", HexFormat.of().formatHex(Crypto.centralKeys.getPublic().getEncoded()));
-        return Json.stringify(exportPackage);
     }
 
     // --- 4. LAB SERVER WORKFLOW IMPLEMENTATIONS ---

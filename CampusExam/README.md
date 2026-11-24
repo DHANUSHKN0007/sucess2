@@ -388,7 +388,6 @@ All requests and responses use JSON (`application/json; charset=utf-8`). Authent
 | `GET` | `/api/coe/papers?bank_id=<id>` | `bank_id` | Inspects paper set metadata (question text strictly omitted) |
 | `POST` | `/api/coe/select-paper` | `session_id`, `paper_id` | Binds paper set & triggers **Stage B Version Engine (A–D)** |
 | `POST` | `/api/coe/finalize-session` | `session_id` | Freezes session parameters and snapshot of eligible candidates |
-| `POST` | `/api/coe/export-package` | `session_id` | Exports AES-256-GCM + RSA-OAEP encrypted & signed package |
 | `POST` | `/api/coe/import-results` | `sessionId`, `resultPayloadJson`, `labSignatureHex` | Ingests and verifies digitally signed lab results |
 | `POST` | `/api/coe/approve-results` | `sessionId` | Approves verified results based on statistical metrics |
 | `POST` | `/api/coe/release-results` | `sessionId` | Formally releases results to HOD/Principal and **retires paper set** |
@@ -484,41 +483,9 @@ http://127.0.0.1:8080/index.html
 
 ### 4. Running Verification Test Suites
 
-The codebase includes automated test suites validating all functional and architectural requirements:
+The codebase includes a baseline smoke test:
 
-#### A. Comprehensive End-to-End Workflow Test
-Validates all 15 sections of [`/docs/MIT_Architecture_and_Workflow.pdf`](file:///C:/Users/Vaishak%20M/Downloads/proj/CampusExam-Java-PostgreSQL/CampusExam/docs/MIT_Architecture_and_Workflow.pdf):
-```powershell
-python mit_workflow_test.py
-```
-**Verification Scope:**
-- Principal setup (Departments, Groups, Subjects, Accounts).
-- HOD boundary enforcement (`403 Forbidden` on unauthorized department access).
-- Upload of 300 MCQs across 5 Modules and Stage A generation of Papers 1–4.
-- COE sitting scheduling and duplicate booking conflict prevention (`409 Conflict`).
-- COE security boundary (question prompts and answer keys concealed from COE).
-- Stage B generation of Versions A–D and session freezing.
-- Cryptographic packaging (AES-256-GCM + RSA-OAEP + SHA256withRSA).
-- Lab Server ingestion, digital signature verification, and timed memory decryption.
-- Offline student authentication and examination delivery (zero answer key leakage).
-- Local automated MCQ evaluation and signed result export.
-- COE result verification, approval, release, and paper retirement.
-- Departmental result visibility for HOD and institutional reports for Principal.
-- Append-only audit trail verification.
-
-#### B. User Perspective Simulation Test
-Simulates human personas through a complete examination cycle:
-```powershell
-python user_perspective_test.py
-```
-**Simulated Personas:**
-- **Persona 1**: Dr. B.G. Sangameshwara (Principal / Central Admin)
-- **Persona 2**: Dr. Ramesh (HOD AIML)
-- **Persona 3**: Prof. S. Kumar (Controller of Examinations)
-- **Persona 4**: Mr. Manjunath (Lab 402 Administrator)
-- **Personas 5, 6, 7**: Student Candidates (Aarav Sharma, Bhavana Patel, Chetan Gowda) taking Versions A, B, and C.
-
-#### C. Backward-Compatibility Smoke Test
+#### Backward-Compatibility Smoke Test
 Validates baseline database operations and legacy compatibility:
 ```powershell
 $env:BOOTSTRAP_PASSWORD = "password1234"

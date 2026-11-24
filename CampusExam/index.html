@@ -263,12 +263,11 @@
           <button class="btn" onclick="scheduleSessionCOE()">Schedule Session with Conflict Check</button>
         </div>
         <div>
-          <h4 style="margin-bottom: 10px;">Session Operations & Cryptographic Export</h4>
+          <h4 style="margin-bottom: 10px;">Session Operations</h4>
           <div class="form-group"><label>Target Session ID</label><input type="text" id="coeTargetSession" placeholder="1" /></div>
           <div style="display: flex; flex-direction: column; gap: 8px;">
             <button class="btn btn-secondary" onclick="selectPaperCOE()">Select Paper (Stage B: Versions A-D)</button>
             <button class="btn btn-secondary" onclick="finalizeSessionCOE()">Freeze Roster Snapshot & Settings</button>
-            <button class="btn btn-success" onclick="exportPackageCOE()">Export Secure Encrypted & Signed Package</button>
           </div>
         </div>
       </div>
@@ -606,21 +605,6 @@
       const data = await res.json();
       if (data.status === 'FROZEN') { alert(`Session ${sessionId} FROZEN: ${data.frozenStudents} candidates locked.`); loadCoeSessions(); }
       else alert('Error: ' + (data.error || 'Failed'));
-    }
-
-    async function exportPackageCOE() {
-      const sessionId = document.getElementById('coeTargetSession').value.trim();
-      if (!sessionId) return alert('Enter Target Session ID');
-      const res = await fetch(`${API}/coe/export-package`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ session_id: sessionId }).toString()
-      });
-      const data = await res.json();
-      if (data.packageUid) {
-        alert(`Secure Package Exported: ${data.packageUid}\nPayload Encrypted with Lab Public Key & Digitally Signed.`);
-        loadCoeSessions();
-      } else alert('Error: ' + (data.error || 'Failed'));
     }
 
     async function activateLab() {
