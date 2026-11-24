@@ -1903,8 +1903,8 @@ Authenticates COE Emergency Recovery Instructor (Lab Instructor).
 **Request Body:**
 ```json
 {
-  "recoveryId": "EMGR-LOGIN-01",
-  "recoveryKey": "ProTick-0011"
+  "recoveryId": "<instructor username>",
+  "recoveryKey": "<instructor password>"
 }
 ```
 
@@ -1914,7 +1914,7 @@ Authenticates COE Emergency Recovery Instructor (Lab Instructor).
   "authenticated": true,
   "token": "<instructorToken>",
   "instructor": {
-    "recoveryId": "EMGR-LOGIN-01",
+    "recoveryId": "<instructor username>",
     "name": "COE Emergency Recovery Invigilator"
   }
 }
@@ -1978,8 +1978,6 @@ Query params: `search?`, `department?`, `status?`, `laboratory?`
 ```json
 {
   "enabled": true,
-  "recoveryId": "EMGR-LOGIN-01",
-  "recoveryKey": "ProTick-0011",
   "lastRotatedAt": "2026-11-12T09:00:00.000Z",
   "rotatedBy": "COE Administration (MIT Mysore)"
 }

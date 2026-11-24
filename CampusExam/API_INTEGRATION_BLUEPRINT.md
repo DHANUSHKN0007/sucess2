@@ -439,7 +439,7 @@ All endpoints in this section are served by the **Isolated Lab Server** located 
 - **Method:** `POST`
 - **Path:** `/api/instructor/login`
 - **Authentication:** Public
-- **Request JSON:** `{ "recoveryId": "EMGR-LOGIN-01", "recoveryKey": "ProTick-0011" }`
+- **Request JSON:** `{ "recoveryId": "<instructor username>", "recoveryKey": "<instructor password>" }`
 - **Response JSON (`200 OK`):** `{ "authenticated": true, "token": "<instructor_jwt_token>", "instructor": { "name": "COE Emergency Recovery Invigilator" } }`
 
 #### 2.3.2 Approve Re-Login for Crashed Terminal (`POST /api/recovery/relogin-authorisations/approve`)

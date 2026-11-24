@@ -421,8 +421,8 @@ Verifies room invigilator credentials to resume a locked candidate session.
 - **Request Body**:
 ```json
 {
-  "recoveryId": "EMGR-LOGIN-01",
-  "recoveryKey": "ProTick-0011"
+  "recoveryId": "<instructor username>",
+  "recoveryKey": "<instructor password>"
 }
 ```
 - **Success Response (`200 OK`)**:
@@ -431,7 +431,7 @@ Verifies room invigilator credentials to resume a locked candidate session.
   "authenticated": true,
   "token": "instr_session_token_jwt",
   "instructor": {
-    "recoveryId": "EMGR-LOGIN-01",
+    "recoveryId": "<instructor username>",
     "name": "COE Emergency Recovery Invigilator"
   }
 }
@@ -484,7 +484,7 @@ Verifies room invigilator credentials to resume a locked candidate session.
   "targetSystemId": "Any Available PC",
   "examinationSessionStatus": "INTERRUPTED",
   "reloginRequestStatus": "APPROVED",
-  "instructorAuthorisation": "EMGR-LOGIN-01 (Lab Instructor)",
+  "instructorAuthorisation": "<instructor id> (Lab Instructor)",
   "reason": "Terminal Hardware Crash on LAB01-PC-03",
   "authorisedAt": "2026-11-16T09:45:00.000Z",
   "expiresAt": "2026-11-16T10:00:00.000Z",
@@ -526,8 +526,6 @@ Verifies room invigilator credentials to resume a locked candidate session.
 ```json
 {
   "enabled": true,
-  "recoveryId": "EMGR-LOGIN-01",
-  "recoveryKey": "ProTick-0011",
   "lastRotatedAt": "2026-11-12T09:00:00.000Z",
   "rotatedBy": "COE Administration (MIT Mysore)"
 }

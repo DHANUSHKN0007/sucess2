@@ -611,7 +611,7 @@ CREATE TABLE relogin_authorisations (
     request_status VARCHAR(30) NOT NULL DEFAULT 'PENDING_APPROVAL' 
         CHECK (request_status IN ('PENDING_APPROVAL', 'APPROVED', 'CONSUMED', 'DENIED', 'EXPIRED')),
     authorised_by VARCHAR(36) REFERENCES users(id) ON DELETE SET NULL,
-    instructor_authorisation VARCHAR(100), -- e.g., 'EMGR-LOGIN-01 (Lab Instructor)'
+    instructor_authorisation VARCHAR(100), -- e.g., '<instructor id> (Lab Instructor)'
     reason TEXT NOT NULL, -- e.g., 'Terminal Hardware Crash on LAB01-PC-03'
     authorised_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ,

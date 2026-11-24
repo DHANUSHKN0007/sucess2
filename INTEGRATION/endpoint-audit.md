@@ -35,8 +35,8 @@
 | COE | `apiClient.ts` | `http://192.168.10.50:8443/lab-api/v1` (labRaw fallback) | Lab server hardcoded LAN IP |
 | Student | `api/client.ts` | `http://localhost:8080` (fallback) | Dev fallback |
 | Student | `securityService.ts` | `MIT@CBT2026` | INVIGILATOR_SECRET_PASSWORD — hardcoded, security risk |
-| Student | `emergencyRecoveryService.ts` | `EMGR-LOGIN-01` / `ProTick-0011` | Fixed recovery credentials — plaintext |
-| Student | `emergencyRecoveryService.ts` | `lab` / `lab@123` | Alt instructor credentials — plaintext |
+| Student | `emergencyRecoveryService.ts` | built-in recovery login (value redacted) | Fixed recovery credentials — plaintext |
+| Student | `emergencyRecoveryService.ts` | built-in alternate instructor login (value redacted) | Alt instructor credentials — plaintext |
 
 ---
 
@@ -401,8 +401,8 @@ x-hod-user-name: {actor.fullName}  (courseOutcomeService only)
 > [!CAUTION]
 > **Hardcoded credentials found in student portal source code:**
 > - `securityService.ts` line 14: `INVIGILATOR_SECRET_PASSWORD = 'MIT@CBT2026'` — plaintext password exposed in browser bundle
-> - `emergencyRecoveryService.ts` lines 20-22: `EMGR-LOGIN-01` / `ProTick-0011` — recovery credentials in bundle
-> - `emergencyRecoveryService.ts` lines 25-28: `lab` / `lab@123` — alternate instructor credentials in bundle
+> - `emergencyRecoveryService.ts` lines 20-22: built-in recovery login (value redacted) — recovery credentials in bundle
+> - `emergencyRecoveryService.ts` lines 25-28: built-in alternate instructor login (value redacted) — alternate instructor credentials in bundle
 > These must be moved to backend-only verification; the frontend should NEVER hold them.
 
 > [!WARNING]

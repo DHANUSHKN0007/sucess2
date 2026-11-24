@@ -6,6 +6,9 @@ Lab server lockdown checks. Run against a lab server started WITHOUT LAB_TEST_MO
 Set LAB_INSTRUCTOR_USERNAME and LAB_INSTRUCTOR_PASSWORD to the instructor account the
 server was started with. Leave them unset to check a server started without one (login
 must then be disabled). Takes ~20 s because failed instructor logins slow later attempts.
+
+Central (CENTRAL_URL, default http://127.0.0.1:8081) reads the same two variables, so start it with the
+same account. If central is not reachable its checks are skipped, not failed.
 """
 import json
 import os
@@ -16,14 +19,15 @@ import urllib.error
 import urllib.request
 
 LAB = "http://127.0.0.1:8082/api"
+CENTRAL = os.environ.get("CENTRAL_URL", "http://127.0.0.1:8081") + "/api"
 INSTRUCTOR_ID = os.environ.get("LAB_INSTRUCTOR_USERNAME", "")
 INSTRUCTOR_PASSWORD = os.environ.get("LAB_INSTRUCTOR_PASSWORD", "")
 OLD_BUILT_IN_LOGINS = [("lab", "lab@123"), ("EMGR-LOGIN-01", "ProTick-0011")]
 results = []
 
 
-def call(method, path, data=None, headers=None):
-    req = urllib.request.Request(f"{LAB}/{path}", method=method, headers={"Content-Type": "application/json", **(headers or {})},
+def call(method, path, data=None, headers=None, base=LAB):
+    req = urllib.request.Request(f"{base}/{path}", method=method, headers={"Content-Type": "application/json", **(headers or {})},
                                  data=json.dumps(data).encode() if data is not None else None)
     try:
         with urllib.request.urlopen(req, timeout=40) as r:
@@ -37,8 +41,28 @@ def check(name, ok, details):
     print(f"[{'PASS' if ok else 'FAIL'}] {name} - {details}")
 
 
+def check_central():
+    try:
+        call("GET", "health", base=CENTRAL)
+    except urllib.error.URLError as e:
+        print(f"[SKIP] Central instructor login checks - central not reachable at {CENTRAL} ({e.reason})")
+        return
+    attempts = [("blank login", {"recoveryId": "", "recoveryKey": ""}), ("login with no fields", {})]
+    attempts += [(f"old built-in login {user}", {"recoveryId": user, "recoveryKey": password}) for user, password in OLD_BUILT_IN_LOGINS]
+    for name, payload in attempts:
+        code, body = call("POST", "instructor/login", payload, base=CENTRAL)
+        if INSTRUCTOR_ID and INSTRUCTOR_PASSWORD:
+            check(f"Central refuses {name}", code == 401, f"HTTP {code}")
+        else:
+            check(f"Central (no instructor account configured) refuses {name}",
+                  code == 503 and body.get("code") == "INSTRUCTOR_LOGIN_NOT_CONFIGURED", f"HTTP {code}, {body.get('code')}")
+    if INSTRUCTOR_ID and INSTRUCTOR_PASSWORD:
+        code, body = call("POST", "instructor/login", {"recoveryId": INSTRUCTOR_ID, "recoveryKey": INSTRUCTOR_PASSWORD}, base=CENTRAL)
+        check("Central accepts the configured instructor", code == 200 and body.get("authenticated") is True, f"HTTP {code}")
+
+
 def main():
-    forged = {"X-Simulated-Time-Ms": "0", "X-Effective-Time-Ms": "0", "X-Bypass-Start-Check": "1"}
+    forged ={"X-Simulated-Time-Ms": "0", "X-Effective-Time-Ms": "0", "X-Bypass-Start-Check": "1"}
 
     # (a) A forged client clock is ignored. Honoured, 1970 would reject the login as not started.
     code, login = call("POST", "student/login", {"usn": "4MH21CS003", "dateOfBirth": "2004-01-03", "workstationId": "LOCKDOWN-PC-03",
@@ -123,6 +147,8 @@ def main():
         del payload[missing]
         code, body = call("POST", "security/violation", payload, {"Authorization": f"Bearer {token}"})
         check(f"Violation without {missing} rejected with 400", code == 400 and body.get("errorCode") == "MISSING_VIOLATION_DETAILS", f"HTTP {code}, {body.get('errorCode')}")
+
+    check_central()
 
     passed = sum(results)
     print(f"\nLOCKDOWN RESULTS: {passed} PASSED / {len(results) - passed} FAILED")
