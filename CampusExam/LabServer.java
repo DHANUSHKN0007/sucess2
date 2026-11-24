@@ -461,6 +461,20 @@ public final class LabServer {
         }
     }
 
+    // Result documents are official, so a missing subject, department or cycle fails the finalize instead of printing a guess.
+    private static String requireMetaText(Map<String, Object> meta, String... keys) {
+        for (String key : keys) {
+            Object v = meta.get(key);
+            if (v != null && !v.toString().isBlank()) return v.toString().trim();
+        }
+        throw packageIncomplete(keys[keys.length - 1]);
+    }
+
+    private static LabException packageIncomplete(String field) {
+        return new LabException(409, "Results were not generated: the package for this sitting has no " + field
+                + ", and it is printed on the official result documents. Export and send the package again from the COE portal.", "PACKAGE_METADATA_MISSING");
+    }
+
     private static long parseLongSafe(Object val) {
         if (val == null) return 0L;
         if (val instanceof Number n) return n.longValue();
@@ -3678,11 +3692,12 @@ public final class LabServer {
         Map<String, Map<String, Object>> targetVersions = (cohort != null && !cohort.versions.isEmpty()) ? cohort.versions : RuntimeState.versions;
         Map<String, String> targetStudentVersion = (cohort != null && !cohort.studentAssignedVersion.isEmpty()) ? cohort.studentAssignedVersion : RuntimeState.studentAssignedVersion;
 
-        String dept = (String) meta.getOrDefault("department", meta.getOrDefault("departmentCode", "CSE"));
-        int semester = (int) parseLongSafe(meta.getOrDefault("semester", 5));
-        String subCode = (String) meta.getOrDefault("subjectCode", "21CS51");
-        String subName = (String) meta.getOrDefault("subjectName", "Computer Networks");
-        String cycle = (String) meta.getOrDefault("cycleName", "2026-DEC");
+        String dept = requireMetaText(meta, "department", "departmentCode");
+        int semester = (int) parseLongSafe(requireMetaText(meta, "semester"));
+        if (semester <= 0) throw packageIncomplete("semester");
+        String subCode = requireMetaText(meta, "subjectCode");
+        String subName = requireMetaText(meta, "subjectName");
+        String cycle = requireMetaText(meta, "cycleName");
 
         int totalCandidates = targetRoster.size();
         int attended = 0;

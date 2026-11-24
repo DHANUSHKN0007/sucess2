@@ -36,8 +36,11 @@ export const resultService = {
       throw new Error(`Cannot reach the Lab Server at ${labBase} to finalize the results. Ensure the Lab Server is running.`);
     }
     if (!finalizeRes.ok) {
+      // The lab names the reason (for example a package with no cycle); a bare status code would hide it.
+      const reason = await finalizeRes.json().then((b) => (typeof b?.message === 'string' ? b.message : ''), () => '');
       throw new Error(
-        `Lab Server could not finalize the results (HTTP ${finalizeRes.status}), so the .labresult package was not downloaded: it could be out of date.`
+        reason ||
+          `Lab Server could not finalize the results (HTTP ${finalizeRes.status}), so the .labresult package was not downloaded: it could be out of date.`
       );
     }
 
