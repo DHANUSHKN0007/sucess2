@@ -15,6 +15,20 @@ import {
 } from '../types/security';
 import { AttemptScope, securityService } from '../services/securityService';
 
+// A docked DevTools pane shrinks the page viewport while the browser window keeps its size.
+const DEVTOOLS_GAP_PX = 160;
+const VIEWPORT_POLL_MS = 1000;
+
+// Matches the physical key (e.code) so a non-Latin keyboard layout, e.g. Kannada, cannot slip past an e.key check.
+// Autofill dispatches key events with no key or code, hence the fallbacks.
+function isDevToolsShortcut(e: KeyboardEvent): boolean {
+  if (e.key === 'F12') return true;
+  const code = e.code ?? '';
+  const letter = code.startsWith('Key') ? code.slice(3) : (e.key ?? '').toUpperCase();
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && ['I', 'J', 'C'].includes(letter)) return true;
+  return letter === 'U' && (e.ctrlKey || (e.metaKey && e.altKey));
+}
+
 interface UseExaminationSecurityProps {
   enabled: boolean;
   student: StudentIdentity | null;
@@ -56,6 +70,9 @@ export function useExaminationSecurity({
   const [isVerifying, setIsVerifying] = useState(false);
   const [verificationError, setVerificationError] = useState<string | null>(null);
   const [resumptionMessage, setResumptionMessage] = useState<string | null>(null);
+
+  // Lives in a ref so re-attaching the listeners below never re-baselines it and hides a DevTools pane opened in between.
+  const viewportBaseline = useRef<{ dpr: number; fullscreen: boolean; gapW: number; gapH: number } | null>(null);
 
   // Keep references to current state so event listeners always access latest values without stale closures
   const stateRef = useRef({
@@ -198,13 +215,7 @@ export function useExaminationSecurity({
       }
 
       // F12 or DevTools shortcuts
-      if (
-        e.key === 'F12' ||
-        (e.ctrlKey &&
-          e.shiftKey &&
-          ['I', 'i', 'J', 'j', 'C', 'c'].includes(e.key)) ||
-        (e.ctrlKey && (e.key === 'u' || e.key === 'U'))
-      ) {
+      if (isDevToolsShortcut(e)) {
         e.preventDefault();
         e.stopPropagation();
         triggerViolation(
@@ -325,11 +336,36 @@ export function useExaminationSecurity({
       );
     };
 
+    // 8. Docked DevTools: the viewport shrinks relative to the browser window. Browser zoom, a display change and a
+    // fullscreen toggle also move these numbers, but each changes devicePixelRatio or the fullscreen state, so those
+    // samples only re-baseline instead of raising a violation.
+    const handleViewportPoll = () => {
+      const sample = {
+        dpr: window.devicePixelRatio,
+        fullscreen: !!document.fullscreenElement,
+        gapW: window.outerWidth - window.innerWidth,
+        gapH: window.outerHeight - window.innerHeight,
+      };
+      const base = viewportBaseline.current;
+      if (!base || base.dpr !== sample.dpr || base.fullscreen !== sample.fullscreen) {
+        viewportBaseline.current = sample;
+        return;
+      }
+      if (sample.gapW - base.gapW > DEVTOOLS_GAP_PX || sample.gapH - base.gapH > DEVTOOLS_GAP_PX) {
+        triggerViolation(
+          'DEVTOOLS_ATTEMPT',
+          'Developer Tools Detected',
+          'The examination viewport shrank relative to the browser window, which indicates developer tools were opened.'
+        );
+      }
+    };
+    const viewportTimer = window.setInterval(handleViewportPoll, VIEWPORT_POLL_MS);
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleWindowBlur);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     window.addEventListener('keydown', handleKeyDown, true);
-    window.addEventListener('contextmenu', handleContextMenu);
+    window.addEventListener('contextmenu', handleContextMenu, true);
     document.addEventListener('copy', handleCopy);
     document.addEventListener('paste', handlePaste);
     document.addEventListener('cut', handleCut);
@@ -337,11 +373,12 @@ export function useExaminationSecurity({
     window.addEventListener('pagehide', handlePageHide);
 
     return () => {
+      window.clearInterval(viewportTimer);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleWindowBlur);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       window.removeEventListener('keydown', handleKeyDown, true);
-      window.removeEventListener('contextmenu', handleContextMenu);
+      window.removeEventListener('contextmenu', handleContextMenu, true);
       document.removeEventListener('copy', handleCopy);
       document.removeEventListener('paste', handlePaste);
       document.removeEventListener('cut', handleCut);

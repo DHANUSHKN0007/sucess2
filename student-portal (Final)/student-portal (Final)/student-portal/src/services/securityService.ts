@@ -49,6 +49,23 @@ const INITIAL_LOCK_STATE: SecurityLockState = {
   savedAnswerCount: 0,
 };
 
+const VIOLATION_POST_ATTEMPTS = 3;
+
+// The server is the real control: until it records the violation it keeps accepting answers from a locked screen, so one
+// dropped request must not lose it. Gives up quietly after a few tries; the local lock still stands.
+async function reportViolation(payload: Record<string, unknown>): Promise<void> {
+  for (let attempt = 1; attempt <= VIOLATION_POST_ATTEMPTS; attempt++) {
+    try {
+      await apiClient.post('/api/security/violation', payload);
+      return;
+    } catch {
+      if (attempt < VIOLATION_POST_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      }
+    }
+  }
+}
+
 export const securityService = {
   getLockState(scope?: AttemptScope): SecurityLockState {
     try {
@@ -152,21 +169,17 @@ export const securityService = {
     });
 
     // Notify backend server asynchronously
-    apiClient
-      .post('/api/security/violation', {
-        violationType: params.violationType,
-        label: params.label,
-        description: params.description,
-        studentUsn: params.studentUsn,
-        examinationId: params.examinationId,
-        sittingName: params.sittingName,
-        currentQuestionIndex: params.currentQuestionIndex,
-        remainingSeconds: params.remainingSeconds,
-        answeredCount: params.answeredCount,
-      })
-      .catch(() => {
-        // Safe offline fallback
-      });
+    void reportViolation({
+      violationType: params.violationType,
+      label: params.label,
+      description: params.description,
+      studentUsn: params.studentUsn,
+      examinationId: params.examinationId,
+      sittingName: params.sittingName,
+      currentQuestionIndex: params.currentQuestionIndex,
+      remainingSeconds: params.remainingSeconds,
+      answeredCount: params.answeredCount,
+    });
 
     return updatedState;
   },
