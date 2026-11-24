@@ -116,6 +116,14 @@ def main():
         waited = time.time() - started
         check("Other workstation signs in after a delay", code == 200 and waited >= 4, f"HTTP {code}, waited {waited:.1f}s")
 
+    # A violation missing its details is a client error, not a server crash.
+    token = call("POST", "student/login", {"usn": "4MH21CS005", "dateOfBirth": "2004-01-05", "workstationId": "LOCKDOWN-PC-05"})[1].get("student", {}).get("sessionToken")
+    for missing in ["label", "violationType"]:
+        payload = {"violationType": "TAB_SWITCH", "label": "Tab"}
+        del payload[missing]
+        code, body = call("POST", "security/violation", payload, {"Authorization": f"Bearer {token}"})
+        check(f"Violation without {missing} rejected with 400", code == 400 and body.get("errorCode") == "MISSING_VIOLATION_DETAILS", f"HTTP {code}, {body.get('errorCode')}")
+
     passed = sum(results)
     print(f"\nLOCKDOWN RESULTS: {passed} PASSED / {len(results) - passed} FAILED")
     sys.exit(0 if passed == len(results) else 1)

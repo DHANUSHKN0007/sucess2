@@ -2048,6 +2048,12 @@ public final class LabServer {
     private static String handleSecurityViolation(HttpExchange exchange, Map<String, Object> form) throws Exception {
         // Identity comes only from the session token; a body studentUsn is ignored so one client cannot lock another.
         String usn = (String) requireStudentSession(exchange).get("usn");
+        // The lock record stores both in a ConcurrentHashMap, which rejects nulls.
+        Object violationType = form.get("violationType");
+        Object violationLabel = form.get("label");
+        if (violationType == null || String.valueOf(violationType).isBlank() || violationLabel == null || String.valueOf(violationLabel).isBlank()) {
+            throw new LabException(400, "violationType and label are required", "MISSING_VIOLATION_DETAILS");
+        }
 
         long examId = parseLongSafe(form.get("examinationId"));
         String sittingName = String.valueOf(form.getOrDefault("sittingName", form.getOrDefault("sittingCode", ""))).trim().toUpperCase(Locale.ROOT);
