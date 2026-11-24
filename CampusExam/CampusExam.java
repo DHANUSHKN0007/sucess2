@@ -10767,7 +10767,7 @@ public final class CampusExam {
                 'newSystemId', to_workstation,
                 'authorisedAt', to_char(transferred_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                 'reloginAt', to_char(transferred_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-                'authorisedBy', 'EMGR-LOGIN-01',
+                'authorisedBy', 'Lab Instructor',
                 'lastSavedQuestionIndex', 0,
                 'answersRecoveredCount', 0,
                 'remainingSeconds', 2700,
@@ -10780,8 +10780,6 @@ public final class CampusExam {
     static String getRecoveryConfig() {
         Map<String, Object> cfg = new LinkedHashMap<>();
         cfg.put("enabled", true);
-        cfg.put("recoveryId", "EMGR-LOGIN-01");
-        cfg.put("recoveryKey", "ProTick-0011");
         cfg.put("lastRotatedAt", Instant.now().toString());
         cfg.put("rotatedBy", "COE Administration (MIT Mysore)");
         return Json.stringify(cfg);
@@ -11495,21 +11493,40 @@ public final class CampusExam {
         return Json.stringify(resp);
     }
 
-    static String instructorLogin(Connection db, Form form) throws Exception {
-        String username = form.get("recoveryId").isBlank() ? form.get("username") : form.get("recoveryId");
-        String password = form.get("recoveryKey").isBlank() ? form.get("password") : form.get("recoveryKey");
-        if (username.isBlank()) username = "EMGR-LOGIN-01";
-        if (password.isBlank()) password = "ProTick-0011";
+    // Same LAB_INSTRUCTOR_USERNAME / LAB_INSTRUCTOR_PASSWORD_HASH pair the lab server reads: "<saltHex>:<hashHex>",
+    // PBKDF2-HMAC-SHA256 via derive(); see deploy/make-instructor-credential.*. Null when unset or malformed.
+    static byte[][] instructorCredential() {
+        String[] parts = env("LAB_INSTRUCTOR_PASSWORD_HASH", "").trim().split(":");
+        if (env("LAB_INSTRUCTOR_USERNAME", "").isBlank() || parts.length != 2) return null;
+        try {
+            byte[] salt = HexFormat.of().parseHex(parts[0]);
+            byte[] hash = HexFormat.of().parseHex(parts[1]);
+            return salt.length >= 16 && hash.length == 32 ? new byte[][]{salt, hash} : null;
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
 
-        boolean valid = (username.equalsIgnoreCase("EMGR-LOGIN-01") && password.equals("ProTick-0011"))
-                     || (username.equalsIgnoreCase("lab") && password.equals("lab@123"));
-        check(valid, 401, "Invalid instructor emergency credentials");
+    static String instructorLogin(Connection db, Form form) throws Exception {
+        byte[][] credential = instructorCredential();
+        if (credential == null) {
+            throw new Problem(503, "INSTRUCTOR_LOGIN_NOT_CONFIGURED",
+                    "Instructor login is not configured on this server. Ask the administrator to set LAB_INSTRUCTOR_USERNAME and LAB_INSTRUCTOR_PASSWORD_HASH.");
+        }
+        String configured = env("LAB_INSTRUCTOR_USERNAME", "").trim();
+        String username = (form.get("recoveryId").isBlank() ? form.get("username") : form.get("recoveryId")).trim();
+        String password = form.get("recoveryKey").isBlank() ? form.get("password") : form.get("recoveryKey");
+
+        boolean userOk = MessageDigest.isEqual(username.toLowerCase(Locale.ROOT).getBytes(StandardCharsets.UTF_8),
+                configured.toLowerCase(Locale.ROOT).getBytes(StandardCharsets.UTF_8));
+        boolean passOk = MessageDigest.isEqual(derive(password, credential[0]), credential[1]);
+        check(userOk & passOk, 401, "Invalid instructor emergency credentials");
 
         String token = HexFormat.of().formatHex(RANDOM.generateSeed(32));
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("authenticated", true);
         resp.put("token", token);
-        resp.put("instructor", Map.of("recoveryId", username.toUpperCase(Locale.ROOT), "name", "Lab Instructor (MIT Mysore)"));
+        resp.put("instructor", Map.of("recoveryId", configured, "name", "Lab Instructor (MIT Mysore)"));
         return Json.stringify(resp);
     }
 
@@ -11522,7 +11539,7 @@ public final class CampusExam {
                     'reloginSystemId', target_workstation_id,
                     'examinationSessionStatus', 'INTERRUPTED',
                     'reloginRequestStatus', status,
-                    'instructorAuthorisation', 'EMGR-LOGIN-01 (Lab Instructor)',
+                    'instructorAuthorisation', 'Lab Instructor',
                     'dateTime', to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                     'canApprove', (status = 'PENDING' OR status = 'APPROVED'),
                     'activeTokenId', token_id
@@ -11537,7 +11554,7 @@ public final class CampusExam {
         String currentWs = form.get("sourceWorkstation").isBlank() ? form.get("assignedSystemId").isBlank() ? "LAB01-PC-03" : form.get("assignedSystemId") : form.get("sourceWorkstation");
         String targetWs = form.get("targetWorkstation").isBlank() ? "Any Available PC" : form.get("targetWorkstation");
         String reason = form.get("reason").isBlank() ? "Hardware failure / blue screen" : form.get("reason");
-        String instructorId = form.get("instructorId").isBlank() ? "EMGR-LOGIN-01" : form.get("instructorId");
+        String instructorId = form.get("instructorId");
 
         String tokenId = "REL-AUTH-" + usn + "-" + HexFormat.of().formatHex(RANDOM.generateSeed(3)).toUpperCase(Locale.ROOT);
         String secretToken = HexFormat.of().formatHex(RANDOM.generateSeed(16));
@@ -11558,7 +11575,7 @@ public final class CampusExam {
         tokenObj.put("targetSystemId", targetWs);
         tokenObj.put("examinationSessionStatus", "INTERRUPTED");
         tokenObj.put("reloginRequestStatus", "APPROVED");
-        tokenObj.put("instructorAuthorisation", instructorId + " (Lab Instructor)");
+        tokenObj.put("instructorAuthorisation", instructorId.isBlank() ? "Lab Instructor" : instructorId + " (Lab Instructor)");
         tokenObj.put("reason", reason);
         tokenObj.put("authorisedAt", Instant.now().toString());
         tokenObj.put("expiresAt", Instant.now().plus(Duration.ofMinutes(30)).toString());
@@ -11639,7 +11656,7 @@ public final class CampusExam {
         trf.put("newSystemId", newWs);
         trf.put("authorisedAt", Instant.now().toString());
         trf.put("reloginAt", Instant.now().toString());
-        trf.put("authorisedBy", "EMGR-LOGIN-01");
+        trf.put("authorisedBy", "Lab Instructor");
         trf.put("lastSavedQuestionIndex", 0);
         trf.put("answersRecoveredCount", 0);
         trf.put("remainingSeconds", 2700);

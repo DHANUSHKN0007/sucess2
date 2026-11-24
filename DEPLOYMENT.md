@@ -71,5 +71,5 @@ would pass the locality check.
 | `PORT` / `LAB_PORT` | `8082` | Listen port. |
 | `LAB_TEST_MODE` | `false` | `true` honours `X-Simulated-Time-Ms`, `X-Effective-Time-Ms`, `simulatedTimestampMs`, `effectiveTimeMs`, `X-Bypass-Start-Check` and `forceStart`, and enables `test/*`. Never set it for a real examination. |
 | `LAB_STAFF_ALLOW_REMOTE` | `false` | `true` lets non-local callers use the LOCAL STAFF routes. |
-| `LAB_INSTRUCTOR_USERNAME` | unset | Instructor login name (case-insensitive). |
-| `LAB_INSTRUCTOR_PASSWORD_HASH` | unset | `<saltHex>:<hashHex>`, PBKDF2-HMAC-SHA256, 600000 iterations, 32-byte hash. |
+| `LAB_INSTRUCTOR_USERNAME` | unset | Instructor login name (case-insensitive). Central reads the same variable for its own `instructor/login`; with either variable unset or malformed, that login answers 503 `INSTRUCTOR_LOGIN_NOT_CONFIGURED`. |
+| `LAB_INSTRUCTOR_PASSWORD_HASH` | unset | `<saltHex>:<hashHex>`, PBKDF2-HMAC-SHA256, 600000 iterations, 32-byte hash. Central reads it too. |
