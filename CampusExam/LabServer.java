@@ -2079,7 +2079,7 @@ public final class LabServer {
         evt.put("usn", usn);
         Map<String, Object> stud = RuntimeState.roster.get(usn);
         evt.put("studentName", stud != null ? stud.get("fullName") : usn);
-        evt.put("pcNumber", s != null ? s.get("assignedWorkstationId") : "LAB01-PC-01");
+        evt.put("pcNumber", s != null ? s.get("assignedWorkstationId") : "UNREGISTERED");
         evt.put("eventType", String.valueOf(form.getOrDefault("violationType", "TAB_SWITCH")));
         evt.put("timestamp", Instant.now().toString());
         evt.put("resolved", false);
@@ -2094,7 +2094,7 @@ public final class LabServer {
             broadcastSseEvent("student_locked", Map.of(
                 "eventType", "STUDENT_LOCKED",
                 "usn", usn,
-                "pcNumber", s != null ? s.get("assignedWorkstationId") : "LAB01-PC-01",
+                "pcNumber", s != null ? s.get("assignedWorkstationId") : "UNREGISTERED",
                 "violationType", String.valueOf(form.getOrDefault("violationType", "TAB_SWITCH")),
                 "sessionId", String.valueOf(examId),
                 "timestamp", Instant.now().toString()
@@ -2925,6 +2925,15 @@ public final class LabServer {
         }
     }
 
+    // Routes that bind or record a machine must name it; inventing a default would bind or blame a real PC.
+    private static String requireWorkstationId(Map<String, Object> form, String... keys) {
+        for (String key : keys) {
+            Object v = form.get(key);
+            if (v != null && !String.valueOf(v).isBlank()) return String.valueOf(v).trim();
+        }
+        throw new LabException(400, String.join(" or ", keys) + " is required", "MISSING_WORKSTATION_ID");
+    }
+
     // Staff routes that the COE portal and central server call without any credential this server can verify.
     // They are only safe from this host itself, so refuse other callers and anything forwarded by the gateway.
     private static void requireLocalStaff(HttpExchange exchange) {
@@ -2966,7 +2975,7 @@ public final class LabServer {
 
             String reqStatus = "NONE";
             String activeTokId = null;
-            String assignedSys = sess != null ? (String) sess.get("assignedWorkstationId") : "LAB01-PC-01";
+            String assignedSys = sess != null ? (String) sess.get("assignedWorkstationId") : "UNREGISTERED";
             String reloginSys = null;
             String instrAuth = "Pending";
 
@@ -3026,7 +3035,7 @@ public final class LabServer {
         }
 
         String instructorId = String.valueOf(form.getOrDefault("instructorId", "EMGR-LOGIN-01"));
-        String oldPc = sess != null ? (String) sess.get("assignedWorkstationId") : "LAB01-PC-01";
+        String oldPc = sess != null ? (String) sess.get("assignedWorkstationId") : "UNREGISTERED";
         String targetPc = String.valueOf(form.getOrDefault("targetSystemId", form.getOrDefault("newSystemId", "LAB01-PC-02")));
 
         String tokenId = "REC-TOK-" + UUID.randomUUID().toString();
@@ -3082,7 +3091,7 @@ public final class LabServer {
         String usn = String.valueOf(form.getOrDefault("usn", form.getOrDefault("studentUsn", ""))).trim().toUpperCase(Locale.ROOT);
         if (usn.isBlank()) throw new LabException(400, "USN is required", "MISSING_USN");
 
-        String newSystemId = String.valueOf(form.getOrDefault("newSystemId", form.getOrDefault("targetPcId", "LAB01-PC-02"))).trim();
+        String newSystemId = requireWorkstationId(form, "newSystemId", "targetPcId");
         String reqToken = String.valueOf(form.getOrDefault("recoveryToken", form.getOrDefault("tokenId", ""))).trim();
 
         Map<String, Object> token = RuntimeState.recoveryTokens.get(usn);
@@ -3183,7 +3192,7 @@ public final class LabServer {
             item.put("department", details.getOrDefault("department", "CSE"));
             item.put("semester", parseLongSafe(details.getOrDefault("semester", 5)));
             item.put("section", details.getOrDefault("originalSection", "A"));
-            item.put("assignedSystemId", sess != null ? sess.get("assignedWorkstationId") : "LAB01-PC-01");
+            item.put("assignedSystemId", sess != null ? sess.get("assignedWorkstationId") : "UNREGISTERED");
             item.put("status", status);
             item.put("version", RuntimeState.studentAssignedVersion.getOrDefault(usn, "A"));
             item.put("answeredCount", ansCount);
@@ -3227,13 +3236,13 @@ public final class LabServer {
 
     private static String handleLabPcRecovery(HttpExchange exchange, Map<String, Object> form, String path) throws Exception {
         String usn = String.valueOf(form.getOrDefault("studentUsn", "")).trim().toUpperCase(Locale.ROOT);
-        String targetPcId = String.valueOf(form.getOrDefault("targetPcId", "LAB01-PC-05")).trim();
+        String targetPcId = requireWorkstationId(form, "targetPcId");
         String reason = String.valueOf(form.getOrDefault("reason", "Terminal Hardware Failure")).trim();
         String operator = String.valueOf(form.getOrDefault("operatorIdentity", "LAB-INSTRUCTOR-01")).trim();
 
         String token = RuntimeState.usnToSessionToken.get(usn);
         Map<String, Object> sess = token != null ? RuntimeState.studentSessions.get(token) : null;
-        String oldPc = sess != null ? (String) sess.get("assignedWorkstationId") : "LAB01-PC-01";
+        String oldPc = sess != null ? (String) sess.get("assignedWorkstationId") : "UNREGISTERED";
 
         if (oldPc != null) RuntimeState.workstationBindings.remove(oldPc);
         RuntimeState.workstationBindings.put(targetPcId, usn);
@@ -3275,7 +3284,7 @@ public final class LabServer {
 
     private static String handleLabWorkstationBind(HttpExchange exchange, Map<String, Object> form) {
         String usn = String.valueOf(form.getOrDefault("studentUsn", form.getOrDefault("usn", ""))).trim().toUpperCase(Locale.ROOT);
-        String pcId = String.valueOf(form.getOrDefault("pcId", form.getOrDefault("workstationId", "LAB01-PC-01"))).trim();
+        String pcId = requireWorkstationId(form, "pcId", "workstationId");
         RuntimeState.workstationBindings.put(pcId, usn);
         String ver = RuntimeState.studentAssignedVersion.getOrDefault(usn, "A");
         Map<String, Object> binding = Map.of(
@@ -3289,7 +3298,7 @@ public final class LabServer {
 
     private static String handleRecordUnlockEvent(HttpExchange exchange, Map<String, Object> form) {
         String usn = String.valueOf(form.getOrDefault("studentUsn", "")).trim().toUpperCase(Locale.ROOT);
-        String pc = String.valueOf(form.getOrDefault("pcNumber", "LAB01-PC-01")).trim();
+        String pc = requireWorkstationId(form, "pcNumber");
         String uid = "UNLK-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
         Map<String, Object> rec = new LinkedHashMap<>();
         rec.put("id", uid);
