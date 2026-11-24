@@ -1176,9 +1176,11 @@ public final class LabServer {
     private static String handleStudentLogin(HttpExchange exchange, Map<String, Object> form) throws Exception {
         String usn = String.valueOf(form.getOrDefault("usn", form.getOrDefault("username", ""))).trim().toUpperCase(Locale.ROOT);
         String dob = String.valueOf(form.getOrDefault("dateOfBirth", form.getOrDefault("dob", form.getOrDefault("password", "")))).trim();
-        String comp = String.valueOf(form.getOrDefault("workstationId", form.getOrDefault("computerNumber", "PC-01"))).trim().toUpperCase(Locale.ROOT);
+        String comp = String.valueOf(form.getOrDefault("workstationId", form.getOrDefault("computerNumber", ""))).trim().toUpperCase(Locale.ROOT);
 
         if (usn.isBlank()) throw new LabException(400, "USN is required", "MISSING_USN");
+        // "NULL" catches an explicit JSON null, which String.valueOf turns into "null".
+        if (comp.isBlank() || comp.equals("NULL")) throw new LabException(400, "Workstation ID is required", "MISSING_WORKSTATION_ID");
 
         long now = getEffectiveTime(exchange, form);
 
