@@ -499,7 +499,7 @@ router.post('/student/login', async (req, res) => {
       [student.department_id, student.semester_number]
     );
 
-    const exam = examResult.rows[0] || {
+    const exam = examResult.rows[0] || (process.env.ALLOW_SAMPLE_EXAM === 'true' ? {
       id: 'exam-sample',
       subject_code: 'CS501',
       subject_name: 'Advanced Algorithms',
@@ -509,7 +509,16 @@ router.post('/student/login', async (req, res) => {
       maximum_marks: 50,
       passing_marks: 20,
       sitting_id: 'sit-01',
-    };
+    } : null);
+
+    if (!exam) {
+      return res.status(404).json({
+        error: {
+          message: 'No active scheduled examination found for your department and semester.',
+          code: 'NO_SCHEDULED_EXAM',
+        },
+      });
+    }
 
     const sessionToken = jwt.sign(
       { usn: student.usn, studentId: student.id, departmentId: student.department_id },
@@ -554,7 +563,7 @@ router.post('/student/login', async (req, res) => {
 });
 
 // GET /student/instructions (⭐ CONNECTION 3: COE -> Student)
-router.get('/student/instructions', async (req, res) => {
+router.get('/student/instructions', requireAuth, async (req, res) => {
   try {
     const examResult = await dbPool.query(
       `SELECT e.*, es.id as sitting_id, es.sitting_name, es.selected_set_number
@@ -564,7 +573,7 @@ router.get('/student/instructions', async (req, res) => {
        ORDER BY e.exam_date ASC LIMIT 1;`
     );
 
-    const exam = examResult.rows[0] || {
+    const exam = examResult.rows[0] || (process.env.ALLOW_SAMPLE_EXAM === 'true' ? {
       id: 'exam-cs501-2026',
       subject_code: 'CS501',
       subject_name: 'Advanced Algorithms',
@@ -576,7 +585,16 @@ router.get('/student/instructions', async (req, res) => {
       passing_marks: 20,
       maximum_marks: 50,
       sitting_id: 'sit-cs501-morn',
-    };
+    } : null);
+
+    if (!exam) {
+      return res.status(404).json({
+        error: {
+          message: 'No scheduled examination found.',
+          code: 'NO_SCHEDULED_EXAM',
+        },
+      });
+    }
 
     res.json({
       examinationId: exam.id,
@@ -606,24 +624,38 @@ router.get('/student/instructions', async (req, res) => {
 });
 
 // GET /student/exam-session
-router.get('/student/exam-session', async (req, res) => {
+router.get('/student/exam-session', requireAuth, async (req, res) => {
   res.json({
     status: 'ACTIVE',
-    sessionId: 'sess-active',
+    sessionId: req.user?.usn ? `sess-${req.user.usn}` : 'sess-active',
     serverTime: new Date().toISOString(),
   });
 });
 
 // POST /student/exam/submit (⭐ CONNECTION 4: Student -> COE Session Monitoring)
-router.post('/student/exam/submit', async (req, res) => {
-  const { usn, examinationId, answers } = req.body || {};
+router.post('/student/exam/submit', requireAuth, async (req, res) => {
+  const tokenUsn = (req.user?.usn || '').trim().toUpperCase();
+  if (!tokenUsn) {
+    return res.status(403).json({
+      error: { message: 'Submission requires a valid student session token.', code: 'INVALID_STUDENT_SESSION' },
+    });
+  }
+
+  // Reject body USN tampering if client supplied a conflicting USN
+  const bodyUsn = (req.body?.usn || '').trim().toUpperCase();
+  if (bodyUsn && bodyUsn !== tokenUsn) {
+    return res.status(403).json({
+      error: { message: 'Session USN does not match submission payload USN.', code: 'SESSION_MISMATCH' },
+    });
+  }
+
+  const { examinationId, answers } = req.body || {};
   try {
-    if (usn) {
-      await dbPool.query(
-        "UPDATE student_exam_sessions SET status = 'Submitted', submitted_at = CURRENT_TIMESTAMP WHERE usn = $1;",
-        [usn.trim().toUpperCase()]
-      );
-    }
+    await dbPool.query(
+      "UPDATE student_exam_sessions SET status = 'Submitted', submitted_at = CURRENT_TIMESTAMP WHERE usn = $1;",
+      [tokenUsn]
+    );
+
     // Update live session monitoring counts in PostgreSQL
     await dbPool.query(
       `UPDATE session_monitoring
