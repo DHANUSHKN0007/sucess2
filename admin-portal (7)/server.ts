@@ -983,10 +983,19 @@ function resolveServerPort(): number {
   return Number.isInteger(envPort) && envPort > 0 ? envPort : 3000;
 }
 
+// Loopback unless --host says otherwise. The admin gateway is the one door meant for other machines (allowlist, rate
+// limits, headers); listening on every interface here would let anyone on the network walk around it.
+function resolveServerHost(): string {
+  const hostArgIdx = process.argv.indexOf('--host');
+  if (hostArgIdx !== -1 && process.argv[hostArgIdx + 1]) return process.argv[hostArgIdx + 1];
+  return '127.0.0.1';
+}
+
 export async function startServer(): Promise<void> {
   const app = express();
   const httpServer = http.createServer(app);
   const port = resolveServerPort();
+  const host = resolveServerHost();
 
   const apiRouter = createApiRouter();
   app.use('/api/v1', apiRouter);
@@ -1017,8 +1026,8 @@ export async function startServer(): Promise<void> {
     }
   }
 
-  httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`[MITM-EMS] Server listening on http://0.0.0.0:${port}`);
+  httpServer.listen(port, host, () => {
+    console.log(`[MITM-EMS] Server listening on http://${host}:${port}`);
   });
 }
 

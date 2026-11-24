@@ -18,6 +18,7 @@ import java.nio.file.*;
 import java.security.*;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -328,8 +329,15 @@ public final class LabServer {
                 if (todayStr.equals(eDate)) {
                     String sTime = String.valueOf(pl.getOrDefault("startTime", "09:30:00"));
                     int dur = (int) parseLongSafe(pl.getOrDefault("durationMinutes", 90));
-                    long sMs = calculateScheduledStartMs(eDate, sTime);
-                    long eMs = calculateScheduledEndMs(eDate, resolveEndTime(sTime, pl.get("endTime"), dur), sTime, dur);
+                    long sMs;
+                    long eMs;
+                    try {
+                        sMs = calculateScheduledStartMs(eDate, sTime);
+                        eMs = calculateScheduledEndMs(eDate, resolveEndTime(sTime, pl.get("endTime"), dur), sTime, dur);
+                    } catch (DateTimeException ex) {
+                        System.err.println("[LabStorage] Package " + doc.get("packageUid") + " has an unreadable schedule, so it is not preferred at startup: " + ex.getMessage());
+                        continue;
+                    }
                     if (nowMs >= sMs - 15 * 60 * 1000L && nowMs < eMs) {
                         long eid = parseLongSafe(doc.getOrDefault("examinationId", pl.getOrDefault("sessionId", pl.get("examinationId"))));
                         if (primary == null || eid > parseLongSafe(primary.getOrDefault("examinationId", ((Map<?, ?>) primary.getOrDefault("payload", primary)).get("sessionId")))) {
@@ -550,7 +558,8 @@ public final class LabServer {
 
             System.out.println("[LabServer] Cohort #" + examId + " (" + sittingName + ") activated into memory. Roster size: " + cohort.roster.size() + ", Total active cohorts: " + RuntimeState.activeCohorts.size());
         } catch (Exception ex) {
-            System.err.println("[LabServer] Activation into memory failed: " + ex.getMessage());
+            // getMessage() is null for a NullPointerException, which is what a null field in the payload throws.
+            System.err.println("[LabServer] Activation into memory failed: " + ex);
         }
     }
 
@@ -1145,17 +1154,15 @@ public final class LabServer {
         return System.currentTimeMillis();
     }
 
+    // An unreadable schedule throws DateTimeException instead of falling back to "now": that fallback let every
+    // candidate in and kept the window from ever closing. Callers decide how to refuse.
     private static long calculateScheduledStartMs(String examDate, String startTime) {
-        try {
-            if (examDate == null || examDate.isBlank()) examDate = LocalDate.now().toString();
-            if (startTime == null || startTime.isBlank()) startTime = "09:30:00";
-            if (startTime.length() == 5) startTime += ":00";
-            LocalDate d = LocalDate.parse(examDate.trim());
-            LocalTime t = LocalTime.parse(startTime.trim());
-            return d.atTime(t).atZone(IST_ZONE).toInstant().toEpochMilli();
-        } catch (Exception e) {
-            return System.currentTimeMillis();
-        }
+        if (examDate == null || examDate.isBlank()) examDate = LocalDate.now().toString();
+        if (startTime == null || startTime.isBlank()) startTime = "09:30:00";
+        if (startTime.length() == 5) startTime += ":00";
+        LocalDate d = LocalDate.parse(examDate.trim());
+        LocalTime t = LocalTime.parse(startTime.trim());
+        return d.atTime(t).atZone(IST_ZONE).toInstant().toEpochMilli();
     }
 
     private static long calculateScheduledEndMs(String examDate, String endTime, String startTime, int durationMinutes) {
@@ -1355,8 +1362,15 @@ public final class LabServer {
             }
         }
 
-        long scheduledStartMs = calculateScheduledStartMs(examDate, startTime);
-        long scheduledEndMs = calculateScheduledEndMs(examDate, endTime, startTime, durationMinutes);
+        long scheduledStartMs;
+        long scheduledEndMs;
+        try {
+            scheduledStartMs = calculateScheduledStartMs(examDate, startTime);
+            scheduledEndMs = calculateScheduledEndMs(examDate, endTime, startTime, durationMinutes);
+        } catch (DateTimeException ex) {
+            System.err.println("[LabServer] Unreadable schedule for examination " + candExamId + " (date '" + examDate + "', start '" + startTime + "', end '" + endTime + "'): " + ex.getMessage());
+            throw new LabException(500, "This examination's schedule could not be read, so sign-in is closed. Ask your invigilator.", "SCHEDULE_INVALID");
+        }
 
         boolean testBypass = LAB_TEST_MODE && (exchange.getRequestHeaders().getFirst("X-Bypass-Start-Check") != null || Boolean.parseBoolean(String.valueOf(form.get("forceStart"))));
 
@@ -1580,11 +1594,16 @@ public final class LabServer {
     private static String handleStudentLogout(HttpExchange exchange) {
         try {
             Map<String, Object> sess = requireStudentSession(exchange);
-            String token = (String) sess.get("token");
-            String usn = (String) sess.get("usn");
-            RuntimeState.studentSessions.remove(token);
-            RuntimeState.usnToSessionToken.remove(usn);
-        } catch (Exception ignored) {}
+            // A started, unsubmitted attempt stays on the server. Dropping it would hand the candidate a fresh timer on
+            // the next sign-in and leave checkExpiries nothing to auto-submit.
+            boolean running = Boolean.TRUE.equals(sess.get("examStarted")) && !Boolean.TRUE.equals(sess.get("submitted"));
+            if (!running) {
+                RuntimeState.studentSessions.remove((String) sess.get("token"));
+                RuntimeState.usnToSessionToken.remove((String) sess.get("usn"));
+            }
+        } catch (LabException ignored) {
+            // An unknown or expired token has nothing left to log out of.
+        }
         return Json.stringify(Map.of("success", true, "message", "Logged out safely."));
     }
 
@@ -1781,8 +1800,8 @@ public final class LabServer {
         saveSessionToDisk(usn, sess);
 
         Map<String, Object> resp = new LinkedHashMap<>();
-        resp.put("examinationId", String.valueOf(RuntimeState.activeSessionId));
-        resp.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+        resp.put("examinationId", sess.get("examinationId"));
+        resp.put("sessionId", sess.get("sessionId"));
         resp.put("studentUsn", usn);
         resp.put("assignedVersion", sess.get("assignedVersion"));
         resp.put("workstationId", sess.get("assignedWorkstationId"));
@@ -1975,8 +1994,9 @@ public final class LabServer {
             throw new LabException(400, "Examination time expired.", "TIME_EXPIRED");
         }
 
-        String questionId = String.valueOf(form.get("questionId"));
-        if (questionId == null || questionId.isBlank()) {
+        Object rawQuestionId = form.get("questionId");
+        String questionId = rawQuestionId == null ? "" : String.valueOf(rawQuestionId);
+        if (questionId.isBlank()) {
             throw new LabException(400, "questionId is required", "MISSING_QUESTION_ID");
         }
 
@@ -1986,7 +2006,6 @@ public final class LabServer {
         Map<String, Object> verObj = cohort != null ? cohort.versions.get(assignedVersion) : null;
         if (verObj == null) verObj = RuntimeState.versions.get(assignedVersion);
         List<?> rawQuestions = verObj != null ? (List<?>) verObj.get("questions") : Collections.emptyList();
-        System.out.println("[DEBUG-ANS] usn=" + usn + ", assignedVer=" + assignedVersion + ", versions=" + RuntimeState.versions.keySet() + ", rawQCount=" + rawQuestions.size() + ", q0=" + (rawQuestions.isEmpty() ? "empty" : rawQuestions.get(0)));
         boolean qFound = false;
         String resolvedQuestionUid = questionId;
         for (Object q : rawQuestions) {
@@ -2052,8 +2071,8 @@ public final class LabServer {
 
         Map<String, Object> ack = new LinkedHashMap<>();
         ack.put("acknowledged", true);
-        ack.put("examinationId", String.valueOf(RuntimeState.activeSessionId));
-        ack.put("sessionId", String.valueOf(RuntimeState.activeSessionId));
+        ack.put("examinationId", String.valueOf(examId));
+        ack.put("sessionId", String.valueOf(examId));
         ack.put("studentUsn", usn);
         ack.put("questionId", questionId);
         ack.put("selectedOption", selOpt);
@@ -2142,6 +2161,8 @@ public final class LabServer {
         return Json.stringify(Map.of("success", true, "locked", true, "violationCount", count));
     }
 
+    private static final String UNLOCK_PERMANENT_LOCK_MESSAGE = "Maximum authorization attempts exceeded (3/3). This session is permanently locked. Chief Invigilator administrative override required.";
+
     private static String handleSecurityUnlock(HttpExchange exchange, Map<String, Object> form) throws Exception {
         // Identity comes only from the session token; a body studentUsn is ignored. Rejecting here, before any lock
         // state is touched, means a request with no valid token can neither burn nor probe a student's attempts.
@@ -2164,18 +2185,15 @@ public final class LabServer {
 
         String attemptKey = getAttemptLockKey(examId, sittingName, usn);
 
-        Map<String, Object> lock = RuntimeState.studentLockStates.get(attemptKey);
-        if (lock == null) {
-            lock = new ConcurrentHashMap<>();
-            RuntimeState.studentLockStates.put(attemptKey, lock);
-        }
-        int failed = ((Number) lock.getOrDefault("failedAttempts", 0)).intValue();
+        // computeIfAbsent: with get-then-put, parallel first requests each made their own lock map and counter.
+        Map<String, Object> lock = RuntimeState.studentLockStates.computeIfAbsent(attemptKey, k -> new ConcurrentHashMap<>());
+        int failed =((Number) lock.getOrDefault("failedAttempts", 0)).intValue();
 
         if (Boolean.TRUE.equals(lock.get("isPermanentlyLocked")) || failed >= 3) {
             lock.put("isPermanentlyLocked", true);
             saveSecurityToDisk(attemptKey, lock);
             RuntimeState.studentLockStates.put(usn, lock);
-            throw new LabException(403, "Maximum authorization attempts exceeded (3/3). This session is permanently locked. Chief Invigilator administrative override required.", "PERMANENT_LOCK");
+            throw new LabException(403, UNLOCK_PERMANENT_LOCK_MESSAGE, "PERMANENT_LOCK");
         }
 
         String entered = String.valueOf(form.getOrDefault("enteredPassword", form.getOrDefault("candidateSecret", form.getOrDefault("unlockCredential", "")))).trim();
@@ -2204,6 +2222,21 @@ public final class LabServer {
 
         if (Boolean.TRUE.equals(targetVerifier.get("isRevoked"))) {
             throw new LabException(403, "The invigilator unlock credential for this examination sitting has been revoked by COE.", "CREDENTIAL_REVOKED");
+        }
+
+        // Count the attempt before the slow hash check, atomically. Counting afterwards let a burst of parallel guesses
+        // all read the same count, so "three attempts" could be hundreds of guesses.
+        int attemptNo;
+        synchronized (lock) {
+            int used = ((Number) lock.getOrDefault("failedAttempts", 0)).intValue();
+            if (Boolean.TRUE.equals(lock.get("isPermanentlyLocked")) || used >= 3) {
+                lock.put("isPermanentlyLocked", true);
+                saveSecurityToDisk(attemptKey, lock);
+                RuntimeState.studentLockStates.put(usn, lock);
+                throw new LabException(403, UNLOCK_PERMANENT_LOCK_MESSAGE, "PERMANENT_LOCK");
+            }
+            attemptNo = used + 1;
+            lock.put("failedAttempts", attemptNo);
         }
 
         boolean match = false;
@@ -2273,8 +2306,7 @@ public final class LabServer {
             resp.put("state", state);
             return Json.stringify(resp);
         } else {
-            failed++;
-            lock.put("failedAttempts", failed);
+            failed = attemptNo; // already stored when the attempt was reserved above
             if (failed >= 3) lock.put("isPermanentlyLocked", true);
             saveSecurityToDisk(attemptKey, lock);
             RuntimeState.studentLockStates.put(usn, lock);
@@ -2299,8 +2331,10 @@ public final class LabServer {
         return Json.stringify(finalizeSubmission(sess, form));
     }
 
+    // Synchronized so a manual submit racing the timer's auto-submit cannot both pass the idempotency check below
+    // and issue two receipts.
     @SuppressWarnings("unchecked")
-    public static Map<String, Object> finalizeSubmission(Map<String, Object> sess, Map<String, Object> form) throws Exception {
+    public static synchronized Map<String, Object> finalizeSubmission(Map<String, Object> sess, Map<String, Object> form) throws Exception {
         String usn = (String) sess.get("usn");
         long sessEid = parseLongSafe(sess.getOrDefault("examinationId", sess.getOrDefault("sessionId", RuntimeState.activeSessionId)));
         String subKey = sessEid + ":" + usn;
@@ -2427,7 +2461,10 @@ public final class LabServer {
     // A crash mid-write leaves the previous file intact: the new content is forced to disk in a sibling .tmp first
     // and only then swapped in. Leftover .tmp files match no loader suffix, so startup ignores them.
     private static void writeJsonAtomically(Path target, Object doc) throws IOException {
-        writeBytesAtomically(target, Json.stringify(doc).getBytes(StandardCharsets.UTF_8));
+        // Serialise inside the lock too, or a snapshot taken earlier can reach the disk after a newer one.
+        synchronized (DISK_LOCK) {
+            writeBytesAtomically(target, Json.stringify(doc).getBytes(StandardCharsets.UTF_8));
+        }
     }
 
     private static void writeBytesAtomically(Path target, byte[] data) throws IOException {

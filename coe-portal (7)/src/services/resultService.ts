@@ -22,15 +22,23 @@ export const resultService = {
     const config = getApiConfig();
     const labBase = config.labApiBaseUrl;
 
-    // 1. Trigger finalization to ensure package is generated and signed with the latest evaluations
+    // 1. Trigger finalization so the package is generated and signed with the latest evaluations. A failure here must
+    // stop the download: the lab recomputes on every call, so it never refuses an already-finalized sitting, and a
+    // package left over from an earlier finalize would be imported as if it were current.
+    let finalizeRes: Response;
     try {
-      await fetch(`${labBase}/results/finalize`, {
+      finalizeRes = await fetch(`${labBase}/results/finalize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ examinationId, sittingCode: normSitting }),
       });
     } catch {
-      // Continue to download if already finalized
+      throw new Error(`Cannot reach the Lab Server at ${labBase} to finalize the results. Ensure the Lab Server is running.`);
+    }
+    if (!finalizeRes.ok) {
+      throw new Error(
+        `Lab Server could not finalize the results (HTTP ${finalizeRes.status}), so the .labresult package was not downloaded: it could be out of date.`
+      );
     }
 
     // 2. Download the binary .labresult archive

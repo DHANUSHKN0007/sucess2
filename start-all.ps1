@@ -104,7 +104,7 @@ Write-Host "  [OK] COE Portal started (PID: $($coeProc.Id))" -ForegroundColor Gr
 
 # 6. START ADMIN / HOD PORTAL (Port 3000)
 Write-Host "`n[4/5] Starting Admin / HOD Portal on port 3000..." -ForegroundColor Yellow
-$adminCmd = "& { `$env:VITE_API_BASE_URL = 'http://${displayHost}:8081/api/v1'; `$env:PORT = '3000'; Set-Location '$scriptRoot\admin-portal (7)'; npm.cmd run dev -- --port 3000 }"
+$adminCmd = "& { `$env:VITE_API_BASE_URL = 'http://${displayHost}:8081/api/v1'; `$env:PORT = '3000'; Set-Location '$scriptRoot\admin-portal (7)'; npm.cmd run dev -- --port 3000 --host ${bindHost} }"
 $adminProc = Start-Process powershell.exe -ArgumentList "-NoProfile", "-Command", $adminCmd -PassThru -WindowStyle Hidden
 $pids["AdminPortal"] = $adminProc.Id
 Write-Host "  [OK] Admin / HOD Portal started (PID: $($adminProc.Id))" -ForegroundColor Green

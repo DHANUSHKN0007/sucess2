@@ -73,7 +73,7 @@ echo "[4/6] Starting Admin/HOD Portal on port 3000..."
     cd "$SCRIPT_DIR/admin-portal (7)"
     export VITE_API_BASE_URL="http://${DISPLAY_HOST}:8081/api/v1"
     export PORT=3000
-    nohup npm run dev -- --port 3000 > "$SCRIPT_DIR/admin_portal.log" 2>&1 &
+    nohup npm run dev -- --port 3000 --host "$BIND_HOST" > "$SCRIPT_DIR/admin_portal.log" 2>&1 &
     echo $! > "$SCRIPT_DIR/.pid_admin"
 )
 
