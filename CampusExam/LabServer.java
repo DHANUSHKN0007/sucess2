@@ -41,6 +41,7 @@ public final class LabServer {
     public static String LAB_ID = "LAB-CSE-01";
     public static int PORT = 8082;
     public static String BIND = "127.0.0.1";
+    public static boolean LAB_TEST_MODE = false;
     public static Path KEYS_DIR = Path.of("lab_server_keys");
     public static Path STORAGE_DIR = Path.of("lab_storage", "packages");
     public static Path SUBMISSIONS_DIR = Path.of("lab_storage", "submissions");
@@ -108,6 +109,13 @@ public final class LabServer {
         PORT = Integer.parseInt(System.getenv().getOrDefault("PORT", System.getenv().getOrDefault("LAB_PORT", "8082")));
         BIND = System.getenv().getOrDefault("BIND", "127.0.0.1");
         LAB_ID = System.getenv().getOrDefault("LAB_ID", "LAB-CSE-01");
+        LAB_TEST_MODE = Boolean.parseBoolean(System.getenv().getOrDefault("LAB_TEST_MODE", "false"));
+        if (LAB_TEST_MODE) {
+            System.out.println("################################################################################");
+            System.out.println("#  WARNING: LAB_TEST_MODE=true -- NOT FOR A REAL EXAMINATION                   #");
+            System.out.println("#  Client-supplied clock, start-check bypass and /test/* routes are ENABLED.   #");
+            System.out.println("################################################################################");
+        }
 
         String customKeys = System.getenv("LAB_KEYS_DIR");
         if (customKeys != null && !customKeys.isBlank()) KEYS_DIR = Path.of(customKeys);
@@ -632,6 +640,10 @@ public final class LabServer {
         if (normPath.startsWith("lab-api/")) normPath = normPath.substring(8);
         else if (normPath.startsWith("api/")) normPath = normPath.substring(4);
         if (normPath.startsWith("v1/")) normPath = normPath.substring(3);
+        // Same response as an unknown route, so production servers do not reveal that test hooks exist.
+        if (!LAB_TEST_MODE && normPath.startsWith("test/")) {
+            throw new LabException(404, "Endpoint not found on Lab Server: " + method + " " + path, "NOT_FOUND");
+        }
 
         if (normPath.isEmpty() || normPath.equals("health") || normPath.equals("v1/health")) {
             Map<String, Object> resp = new LinkedHashMap<>();
@@ -1076,6 +1088,7 @@ public final class LabServer {
 
     // --- EFFECTIVE TIME HELPER ---
     private static long getEffectiveTime(HttpExchange exchange, Map<String, Object> form) {
+        if (!LAB_TEST_MODE) return System.currentTimeMillis();
         if (exchange != null) {
             String simTimeHdr = exchange.getRequestHeaders().getFirst("X-Simulated-Time-Ms");
             if (simTimeHdr != null && !simTimeHdr.isBlank()) {
@@ -1301,7 +1314,7 @@ public final class LabServer {
         long scheduledStartMs = calculateScheduledStartMs(examDate, startTime);
         long scheduledEndMs = calculateScheduledEndMs(examDate, endTime, startTime, durationMinutes);
 
-        boolean testBypass = exchange.getRequestHeaders().getFirst("X-Bypass-Start-Check") != null || Boolean.parseBoolean(String.valueOf(form.get("forceStart")));
+        boolean testBypass = LAB_TEST_MODE && (exchange.getRequestHeaders().getFirst("X-Bypass-Start-Check") != null || Boolean.parseBoolean(String.valueOf(form.get("forceStart"))));
 
         // Scheduled time enforcement: support early login up to 30 minutes before scheduled start time
         String availabilityState = "ACTIVE";
@@ -1684,7 +1697,7 @@ public final class LabServer {
         long schedEnd = parseLongSafe(sess.get("scheduledEndMs"));
         int durationMinutes = (int) parseLongSafe(sess.getOrDefault("durationMinutes", 90));
 
-        boolean testBypass = exchange.getRequestHeaders().getFirst("X-Bypass-Start-Check") != null || Boolean.parseBoolean(String.valueOf(form.get("forceStart")));
+        boolean testBypass = LAB_TEST_MODE && (exchange.getRequestHeaders().getFirst("X-Bypass-Start-Check") != null || Boolean.parseBoolean(String.valueOf(form.get("forceStart"))));
 
         // Start time check
         if (now < schedStart && !testBypass) {
@@ -3828,7 +3841,7 @@ public final class LabServer {
     private static void setCORS(HttpExchange exchange) {
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-        exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With, X-Simulated-Time-Ms, X-Bypass-Start-Check");
+        exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With" + (LAB_TEST_MODE ? ", X-Simulated-Time-Ms, X-Bypass-Start-Check" : ""));
     }
 
     private static void sendJson(HttpExchange exchange, int status, Object data) throws IOException {
