@@ -10,6 +10,13 @@
  * Backed by: PostgreSQL database "mitm_ems" on localhost:5432
  */
 
+try { require('dotenv').config(); } catch (_) {}
+
+const JWT_SECRET = (process.env.JWT_SECRET || '').trim();
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  throw new Error('JWT_SECRET environment variable is required and must be at least 32 characters long.');
+}
+
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -17,7 +24,6 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
-const JWT_SECRET = process.env.JWT_SECRET || 'mitm_ems_jwt_secret_key_2026';
 
 const dbPool = new Pool({
   host: process.env.PG_HOST || 'localhost',
