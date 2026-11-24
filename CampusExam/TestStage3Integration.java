@@ -421,7 +421,11 @@ public class TestStage3Integration {
         String code = sittingName.contains("AFTERNOON") ? "A" : "M";
         String pkgUid = "PKG-2026-" + examId + "-" + code + "-R1";
         Map<String, Object> req = Map.of("examinationId", examId, "packageUid", pkgUid, "sittingCode", sittingName);
-        Map<String, Object> resp = httpPostJson(LAB_URL + "/lab-api/packages/activate", req, null);
+        // packages/activate needs an instructor token; the lab server has no built-in account, so use the one it was started with.
+        Map<String, Object> login = httpPostJson(LAB_URL + "/lab-api/instructor/login", Map.of(
+                "recoveryId", System.getenv().getOrDefault("LAB_INSTRUCTOR_USERNAME", ""),
+                "recoveryKey", System.getenv().getOrDefault("LAB_INSTRUCTOR_PASSWORD", "")), null);
+        Map<String, Object> resp = httpPostJson(LAB_URL + "/lab-api/packages/activate", req, String.valueOf(login.get("token")));
         if (!Boolean.TRUE.equals(resp.get("success"))) {
             throw new RuntimeException("Lab package activation failed: " + resp);
         }

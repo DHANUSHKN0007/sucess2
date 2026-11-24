@@ -455,7 +455,11 @@ public class TestFinalAcceptance {
     }
 
     private static void activateLabPackage(long examId, String sittingName) throws Exception {
-        String resp = postJson(LAB_URL + "/lab-api/packages/activate", Map.of("examinationId", examId, "sittingCode", sittingName), null);
+        // packages/activate needs an instructor token; the lab server has no built-in account, so use the one it was started with.
+        String login = postJson(LAB_URL + "/lab-api/instructor/login", Map.of(
+                "recoveryId", System.getenv().getOrDefault("LAB_INSTRUCTOR_USERNAME", ""),
+                "recoveryKey", System.getenv().getOrDefault("LAB_INSTRUCTOR_PASSWORD", "")), null);
+        String resp = postJson(LAB_URL + "/lab-api/packages/activate", Map.of("examinationId", examId, "sittingCode", sittingName), extractToken(login));
         System.out.println("  [OK] Lab Server activated package into memory for sitting " + sittingName);
     }
 
