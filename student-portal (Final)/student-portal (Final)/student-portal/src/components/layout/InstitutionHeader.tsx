@@ -45,7 +45,7 @@ export const InstitutionHeader: React.FC<InstitutionHeaderProps> = ({
 }) => {
   const [imgError, setImgError] = useState(false);
   const activeSystemId =
-    systemId || emergencyRecoveryService.getClientSystemId() || 'LAB01-PC-03';
+    systemId || emergencyRecoveryService.getClientSystemId();
   const isBlue = theme === 'blue';
 
   return (

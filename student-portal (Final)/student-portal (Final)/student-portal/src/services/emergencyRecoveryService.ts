@@ -14,6 +14,10 @@ import {
   StudentRecoveryOverview,
 } from '../types/recovery';
 import { apiClient } from '../api/client';
+import { workstationService } from './workstationService';
+
+// Shown when a recovery record carries no workstation, instead of guessing a PC the student may never have used.
+const UNREGISTERED_SYSTEM_ID = 'UNREGISTERED';
 
 // FIXED RECOVERY CREDENTIALS - EXACT AS SPECIFIED BY COE
 export const FIXED_RECOVERY_CREDENTIALS: EmergencyRecoveryCredentials = {
@@ -82,24 +86,17 @@ export interface StudentReLoginItem {
 
 export const emergencyRecoveryService = {
   getClientSystemId(): string {
+    // The legacy key only ever held the same fixed 'LAB01-PC-03' on every machine; drop it so it is never reused.
     try {
-      const stored = localStorage.getItem(STORAGE_KEYS.CLIENT_SYSTEM_ID);
-      if (!stored || stored === 'SYS-001') {
-        localStorage.setItem(STORAGE_KEYS.CLIENT_SYSTEM_ID, 'LAB01-PC-03');
-        return 'LAB01-PC-03';
-      }
-      return stored;
-    } catch {
-      return 'LAB01-PC-03';
-    }
-  },
-
-  setClientSystemId(systemId: string): void {
-    try {
-      localStorage.setItem(STORAGE_KEYS.CLIENT_SYSTEM_ID, systemId);
+      localStorage.removeItem(STORAGE_KEYS.CLIENT_SYSTEM_ID);
     } catch {
       // Ignore
     }
+    return workstationService.getWorkstationId();
+  },
+
+  setClientSystemId(systemId: string): void {
+    workstationService.setWorkstationId(systemId);
   },
 
   isInstructorCredentialId(id: string): boolean {
@@ -218,7 +215,7 @@ export const emergencyRecoveryService = {
 
   async consumeRecoveryAuthorisation(
     usn: string,
-    newSystemId = 'LAB01-PC-07'
+    newSystemId: string
   ): Promise<SessionTransferRecord> {
     try {
       return await apiClient.post<SessionTransferRecord>(
@@ -313,7 +310,7 @@ export const emergencyRecoveryService = {
     const normalized = usn.trim().toUpperCase();
     const registry = this.getLoginRegistry();
     const studentName = registry[normalized]?.studentName || 'Student';
-    const systemId = this.getClientSystemId() || 'LAB01-PC-03';
+    const systemId = this.getClientSystemId();
 
     if (registry[normalized]) {
       registry[normalized].examinationSessionStatus = 'INTERRUPTED';
@@ -433,7 +430,7 @@ export const emergencyRecoveryService = {
         transfer?.previousSystemId ||
         reg.previousSystemId ||
         reg.assignedSystemId ||
-        'LAB01-PC-03';
+        UNREGISTERED_SYSTEM_ID;
 
       const instructorAuth = transfer || (reg.reloginRequestStatus === 'CONSUMED' && reloginSystemId)
         ? `${transfer?.authorisedBy || reg.instructorAuthorisation?.split(' ')[0] || FIXED_RECOVERY_CREDENTIALS.recoveryId} (Re-logged on ${reloginSystemId})`
@@ -483,8 +480,8 @@ export const emergencyRecoveryService = {
         totalQuestions: 30,
         answeredCount: 0,
         lastSaved: reg.lastLoginAt || new Date().toLocaleTimeString(),
-        previousSystemId: reg.assignedSystemId || 'LAB01-PC-03',
-        currentSystemId: reg.assignedSystemId || 'LAB01-PC-03',
+        previousSystemId: reg.assignedSystemId || UNREGISTERED_SYSTEM_ID,
+        currentSystemId: reg.assignedSystemId || UNREGISTERED_SYSTEM_ID,
         recoveryStatus: isInterrupted
           ? 'Available'
           : reg.reloginRequestStatus === 'APPROVED'
@@ -505,7 +502,7 @@ export const emergencyRecoveryService = {
     const normalized = params.usn.trim().toUpperCase();
     const registry = this.getLoginRegistry();
     const studentName = registry[normalized]?.studentName || 'Student';
-    const assignedSystemId = registry[normalized]?.assignedSystemId || 'LAB01-PC-03';
+    const assignedSystemId = registry[normalized]?.assignedSystemId || UNREGISTERED_SYSTEM_ID;
     const instructor = params.instructorId || FIXED_RECOVERY_CREDENTIALS.recoveryId;
 
     const token: ReLoginAuthorisationToken = {
@@ -536,7 +533,7 @@ export const emergencyRecoveryService = {
   ): SessionTransferRecord {
     const normalized = usn.trim().toUpperCase();
     const registry = this.getLoginRegistry();
-    const previousSystemId = registry[normalized]?.assignedSystemId || 'LAB01-PC-03';
+    const previousSystemId = registry[normalized]?.assignedSystemId || UNREGISTERED_SYSTEM_ID;
 
     const transferRecord: SessionTransferRecord = {
       transferId: `TRF-${Date.now().toString(36).toUpperCase()}`,
