@@ -127,6 +127,9 @@ function createGateway(cfg) {
   function forward(req, res, target, body) {
     const headers = { host: `127.0.0.1:${cfg.labPort}`, 'content-length': body.length };
     for (const name of FORWARDED_HEADERS) if (req.headers[name]) headers[name] = req.headers[name];
+    // The lab server refuses staff routes on any request carrying this. Set here for every proxied request,
+    // after the copy above, so a client-supplied value can never stand in for it or be passed through.
+    headers['x-gateway-origin'] = 'gateway';
 
     const upstream = http.request({ host: '127.0.0.1', port: cfg.labPort, method: req.method, path: target, headers }, (upRes) => {
       const out = {};

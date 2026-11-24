@@ -94,6 +94,30 @@ test('forwards allowlisted routes and drops client-controlled time headers', asy
   }
 });
 
+test('X-Gateway-Origin is set by the gateway on every proxied request, whatever the client sent', async (t) => {
+  const { port, seen } = await setup(t);
+  const attempts = [{}, { 'X-Gateway-Origin': 'forged' }, { 'x-gateway-origin': '' }, { 'X-GATEWAY-ORIGIN': 'a', 'x-gateway-origin': 'b' }];
+  for (const headers of attempts) {
+    await send(port, { path: '/api/health', headers });
+    await send(port, { method: 'POST', path: '/api/instructor/login', headers: { ...headers, 'Content-Type': 'application/json' }, body: '{}' });
+  }
+  assert.equal(seen.length, attempts.length * 2);
+  for (const request of seen) assert.equal(request.headers['x-gateway-origin'], 'gateway', request.url);
+});
+
+test('a client-sent X-Gateway-Origin cannot reach a staff route', async (t) => {
+  const { port, seen } = await setup(t);
+  const staff = [['GET', '/api/monitoring/sessions'], ['GET', '/api/results/download'], ['POST', '/api/results/finalize'],
+    ['GET', '/api/labs/servers'], ['GET', '/api/package/receipt'], ['POST', '/api/test/reset-submissions'], ['POST', '/api/package/import']];
+  for (const [method, p] of staff) {
+    for (const value of ['gateway', 'forged', '']) {
+      const res = await send(port, { method, path: p, headers: { 'X-Gateway-Origin': value } });
+      assert.equal(res.status, 404, `${method} ${p} with X-Gateway-Origin "${value}"`);
+    }
+  }
+  assert.equal(seen.length, 0, 'nothing was forwarded to the lab server');
+});
+
 test('staff, system and test routes are a plain 404 and never reach the lab server', async (t) => {
   const { port, seen } = await setup(t);
   const routes = [
