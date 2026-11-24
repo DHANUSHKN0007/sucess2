@@ -13,7 +13,7 @@ import {
   StudentLoginRegistryRecord,
   StudentRecoveryOverview,
 } from '../types/recovery';
-import { apiClient } from '../api/client';
+import { apiClient, ApiClientError } from '../api/client';
 import { workstationService } from './workstationService';
 
 // Shown when a recovery record carries no workstation, instead of guessing a PC the student may never have used.
@@ -140,10 +140,13 @@ export const emergencyRecoveryService = {
     instructorId?: string;
   }): Promise<ReLoginAuthorisationToken> {
     try {
-      return await apiClient.post<ReLoginAuthorisationToken>(
+      const token = await apiClient.post<ReLoginAuthorisationToken>(
         '/api/recovery/relogin-authorisations/approve',
         params
       );
+      // The login page spends this approval, and the lab accepts it only with this tokenId, which exists nowhere else.
+      this.saveReLoginTokens([...this.getReLoginTokens().filter((t) => t.studentUsn !== token.studentUsn), token]);
+      return token;
     } catch {
       return this.approveStudentReLoginLocal(params);
     }
@@ -151,14 +154,25 @@ export const emergencyRecoveryService = {
 
   async consumeRecoveryAuthorisation(
     usn: string,
-    newSystemId: string
+    newSystemId: string,
+    tokenId: string
   ): Promise<SessionTransferRecord> {
+    const dropLocalApproval = () =>
+      this.saveReLoginTokens(this.getReLoginTokens().filter((t) => t.tokenId !== tokenId));
     try {
-      return await apiClient.post<SessionTransferRecord>(
+      const transfer = await apiClient.post<SessionTransferRecord>(
         '/api/recovery/relogin-authorisations/consume',
-        { usn, newSystemId }
+        { usn, newSystemId, tokenId }
       );
-    } catch {
+      dropLocalApproval();
+      return transfer;
+    } catch (err) {
+      // A refusal (unknown, expired or already used approval) has to reach the screen: the local copy below would make it
+      // look consumed. The approval is dead either way, so stop offering it.
+      if (err instanceof ApiClientError && !err.isNetworkError) {
+        dropLocalApproval();
+        throw err;
+      }
       return this.consumeReLoginTokenLocal(usn, newSystemId);
     }
   },

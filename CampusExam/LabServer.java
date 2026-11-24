@@ -1428,12 +1428,9 @@ public final class LabServer {
 
         // One live attempt per candidate. A browser profile has its own workstation id, so a second window or an incognito tab
         // looks like another computer; it must not be handed an attempt that is under way. The invigilator moves a candidate
-        // with a PC recovery (which updates assignedWorkstationId) or with an approved re-login: the portal signs in first and
-        // consumes that approval afterwards, so an unused approval has to let this login through.
-        Map<String, Object> approval = RuntimeState.recoveryTokens.get(usn);
-        boolean approvedMove = approval != null && !Boolean.TRUE.equals(approval.get("isOneTimeUsed"))
-                && parseLongSafe(approval.get("expiresAtMs")) > System.currentTimeMillis();
-        if (existingToken != null && comp != null && !comp.isBlank() && !approvedMove) {
+        // with a PC recovery or by consuming an approved re-login (recovery/relogin-authorisations/consume), both of which
+        // update assignedWorkstationId before the candidate signs in on the new computer.
+        if (existingToken != null && comp != null && !comp.isBlank()) {
             Map<String, Object> live = RuntimeState.studentSessions.get(existingToken);
             String liveWs = live != null ? (String) live.get("assignedWorkstationId") : null;
             long liveExp = live != null ? parseLongSafe(live.get("examExpiresAtMs")) : 0L;
@@ -1517,9 +1514,9 @@ public final class LabServer {
 
             RuntimeState.studentSessions.put(token, sess);
             RuntimeState.usnToSessionToken.put(usn, token);
-        } else if ((!Boolean.TRUE.equals(sess.get("examStarted")) || approvedMove) && comp != null && !comp.isBlank()) {
-            // Before the exam starts, or after an invigilator approved the move, the candidate changes computers; the
-            // stored id has to follow, or the next login from the new computer would look like a second one.
+        } else if (!Boolean.TRUE.equals(sess.get("examStarted")) && comp != null && !comp.isBlank()) {
+            // Before the exam starts a candidate may change computers; the stored id has to follow, or the next login
+            // from the new computer would look like a second one.
             sess.put("assignedWorkstationId", comp);
         }
         sess.put("availabilityState", availabilityState);
@@ -3275,19 +3272,20 @@ public final class LabServer {
             throw new LabException(403, "Recovery token is required and must match the approved token", "INVALID_TOKEN");
         }
 
-        if (Boolean.TRUE.equals(token.get("isOneTimeUsed"))) {
-            throw new LabException(403, "Recovery authorization token has already been consumed (one-time use only)", "TOKEN_ALREADY_USED");
-        }
-
         long now = System.currentTimeMillis();
-        long exp = parseLongSafe(token.get("expiresAtMs"));
-        if (now > exp) {
-            throw new LabException(403, "Recovery authorization token has expired", "TOKEN_EXPIRED");
+        // Check and mark under one lock: two simultaneous consumes of one approval must not both move the candidate.
+        synchronized (token) {
+            if (Boolean.TRUE.equals(token.get("isOneTimeUsed"))) {
+                throw new LabException(403, "Recovery authorization token has already been consumed (one-time use only)", "TOKEN_ALREADY_USED");
+            }
+            long exp = parseLongSafe(token.get("expiresAtMs"));
+            if (now > exp) {
+                throw new LabException(403, "Recovery authorization token has expired", "TOKEN_EXPIRED");
+            }
+            token.put("isOneTimeUsed", true);
+            token.put("reloginRequestStatus", "CONSUMED");
+            token.put("consumedAt", Instant.now().toString());
         }
-
-        token.put("isOneTimeUsed", true);
-        token.put("reloginRequestStatus", "CONSUMED");
-        token.put("consumedAt", Instant.now().toString());
 
         String oldPc = (String) token.get("oldSystemId");
         if (oldPc != null) RuntimeState.workstationBindings.remove(oldPc);

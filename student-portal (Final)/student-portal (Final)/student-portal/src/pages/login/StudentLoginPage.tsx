@@ -99,18 +99,22 @@ export const StudentLoginPage: React.FC = () => {
     try {
       const normalizedUsn = trimmedUsn.toUpperCase();
       const normalizedDob = normalizeDobInput(rawDob);
+
+      // An invigilator-approved move is spent first: the lab refuses a started candidate on a new computer until the
+      // approval has moved the attempt here, and it accepts each approval once. A refusal is shown below.
+      const pendingAuth = emergencyRecoveryService.getPendingRecoveryAuthorisation(normalizedUsn);
+      if (pendingAuth) {
+        await emergencyRecoveryService.consumeRecoveryAuthorisation(
+          normalizedUsn,
+          emergencyRecoveryService.getClientSystemId(),
+          pendingAuth.authorisationId
+        );
+      }
+
       await loginStudent({
         usn: normalizedUsn,
         dateOfBirth: normalizedDob,
       });
-
-      // Check if student has an authorized recovery pending
-      const pendingAuth = emergencyRecoveryService.getPendingRecoveryAuthorisation(normalizedUsn);
-      if (pendingAuth) {
-        // Automatically consume recovery authorization on the current machine
-        const currentSysId = emergencyRecoveryService.getClientSystemId();
-        emergencyRecoveryService.consumeRecoveryAuthorisation(normalizedUsn, currentSysId);
-      }
     } catch (err) {
       setAuthError(
         err instanceof Error
