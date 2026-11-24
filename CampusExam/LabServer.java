@@ -422,29 +422,11 @@ public final class LabServer {
                             Map<String, Object> lock = (Map<String, Object>) Json.parse(content);
                             RuntimeState.studentLockStates.put(baseKey, new ConcurrentHashMap<>(lock));
                         } else if (fileName.equals("recovery_transfers.json")) {
-                            String content = Files.readString(p, StandardCharsets.UTF_8);
-                            Object parsed = Json.parse(content);
-                            if (parsed instanceof List<?> l) {
-                                for (Object it : l) {
-                                    if (it instanceof Map<?, ?> m) {
-                                        Map<String, Object> copy = new LinkedHashMap<>();
-                                        m.forEach((k, v) -> copy.put(String.valueOf(k), v));
-                                        RuntimeState.sessionTransfers.add(copy);
-                                    }
-                                }
-                            }
+                            loadEventList(p, RuntimeState.sessionTransfers);
                         } else if (fileName.equals("recovery_audit.json")) {
-                            String content = Files.readString(p, StandardCharsets.UTF_8);
-                            Object parsed = Json.parse(content);
-                            if (parsed instanceof List<?> l) {
-                                for (Object it : l) {
-                                    if (it instanceof Map<?, ?> m) {
-                                        Map<String, Object> copy = new LinkedHashMap<>();
-                                        m.forEach((k, v) -> copy.put(String.valueOf(k), v));
-                                        RuntimeState.recoveryAuditLogs.add(copy);
-                                    }
-                                }
-                            }
+                            loadEventList(p, RuntimeState.recoveryAuditLogs);
+                        } else if (fileName.equals("suspicious_events.json")) {
+                            loadEventList(p, RuntimeState.suspiciousEvents);
                         }
                     } catch (Exception ex) {
                         System.err.println("[LabStorage] Error loading " + p.getFileName() + ": " + ex.getMessage());
@@ -453,6 +435,17 @@ public final class LabServer {
             }
         } catch (Exception ex) {
             System.err.println("[LabStorage] Error reading submissions directory: " + ex.getMessage());
+        }
+    }
+
+    private static void loadEventList(Path file, List<Map<String, Object>> target) throws IOException {
+        if (!(Json.parse(Files.readString(file, StandardCharsets.UTF_8)) instanceof List<?> items)) return;
+        for (Object it : items) {
+            if (it instanceof Map<?, ?> m) {
+                Map<String, Object> copy = new LinkedHashMap<>();
+                m.forEach((k, v) -> copy.put(String.valueOf(k), v));
+                target.add(copy);
+            }
         }
     }
 
@@ -998,7 +991,7 @@ public final class LabServer {
         storageDoc.put("payload", pkgContent);
 
         Path packageFile = STORAGE_DIR.resolve(packageUid + ".json");
-        Files.writeString(packageFile, Json.stringify(storageDoc), StandardCharsets.UTF_8);
+        writeJsonAtomically(packageFile, storageDoc);
 
         RuntimeState.packages.put(packageUid, storageDoc);
         activatePackageIntoMemory(storageDoc);
@@ -1007,7 +1000,7 @@ public final class LabServer {
         String labAckSignatureHex = sign(ackPayload.getBytes(StandardCharsets.UTF_8), labPrivateKey);
 
         storageDoc.put("labAckSignatureHex", labAckSignatureHex);
-        Files.writeString(packageFile, Json.stringify(storageDoc), StandardCharsets.UTF_8);
+        writeJsonAtomically(packageFile, storageDoc);
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("success", true);
@@ -1322,6 +1315,7 @@ public final class LabServer {
             auditEntry.put("reason", "Student USN " + usn + " matches multiple active cohorts: " + matchingIds);
             auditEntry.put("timestamp", Instant.now().toString());
             RuntimeState.recoveryAuditLogs.add(auditEntry);
+            saveRecoveryToDisk();
             throw new LabException(409, "Ambiguous examination allocation: Student USN " + usn + " is registered in multiple active examinations (" + matchingIds + "). Contact examination administrator.", "AMBIGUOUS_ALLOCATION");
         }
 
@@ -2114,6 +2108,7 @@ public final class LabServer {
         evt.put("examinationCode", "EXAM-" + examId);
         evt.put("sittingName", sittingName);
         RuntimeState.suspiciousEvents.add(evt);
+        saveSuspiciousEventsToDisk();
 
         try {
             broadcastSseEvent("student_locked", Map.of(
@@ -2251,6 +2246,7 @@ public final class LabServer {
                     se.put("unlockReason", "Candidate identity verified and workstation unlocked");
                 }
             }
+            saveSuspiciousEventsToDisk();
 
             Map<String, Object> state = new LinkedHashMap<>();
             state.put("isLocked", false);
@@ -2392,7 +2388,7 @@ public final class LabServer {
         subDoc.put("receiptSignatureHex", receiptSignature);
 
         Path finalFile = SUBMISSIONS_DIR.resolve(usn + "_final_submission.json");
-        Files.writeString(finalFile, Json.stringify(subDoc), StandardCharsets.UTF_8);
+        writeJsonAtomically(finalFile, subDoc);
         saveSessionToDisk(usn, sess);
 
         try {
@@ -2430,10 +2426,28 @@ public final class LabServer {
         }
     }
 
+    // One writer at a time: all saves share the "<name>.tmp" sibling, and serialising inside the lock keeps an older
+    // snapshot from replacing a newer one.
+    private static final Object DISK_LOCK = new Object();
+
+    // A crash mid-write leaves the previous file intact: the new content is forced to disk in a sibling .tmp first
+    // and only then swapped in. Leftover .tmp files match no loader suffix, so startup ignores them.
+    private static void writeJsonAtomically(Path target, Object doc) throws IOException {
+        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+        synchronized (DISK_LOCK) {
+            Files.writeString(tmp, Json.stringify(doc), StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.SYNC);
+            try {
+                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
+    }
+
     private static void saveSessionToDisk(String usn, Map<String, Object> sess) {
         try {
-            Path file = SUBMISSIONS_DIR.resolve(usn + "_session.json");
-            Files.writeString(file, Json.stringify(sess), StandardCharsets.UTF_8);
+            writeJsonAtomically(SUBMISSIONS_DIR.resolve(usn + "_session.json"), sess);
         } catch (Exception ex) {
             System.err.println("[LabStorage] Failed to save session for " + usn + ": " + ex.getMessage());
         }
@@ -2441,8 +2455,7 @@ public final class LabServer {
 
     private static void saveAnswersToDisk(String usn) {
         try {
-            Path file = SUBMISSIONS_DIR.resolve(usn + "_answers.json");
-            Files.writeString(file, Json.stringify(RuntimeState.studentAnswers.get(usn)), StandardCharsets.UTF_8);
+            writeJsonAtomically(SUBMISSIONS_DIR.resolve(usn + "_answers.json"), RuntimeState.studentAnswers.get(usn));
         } catch (Exception ex) {
             System.err.println("[LabStorage] Failed to save answers for " + usn + ": " + ex.getMessage());
         }
@@ -2507,8 +2520,7 @@ public final class LabServer {
 
     private static void saveSecurityToDisk(String attemptKey, Map<String, Object> lock) {
         try {
-            Path file = SUBMISSIONS_DIR.resolve(attemptKey + "_security.json");
-            Files.writeString(file, Json.stringify(lock), StandardCharsets.UTF_8);
+            writeJsonAtomically(SUBMISSIONS_DIR.resolve(attemptKey + "_security.json"), lock);
         } catch (Exception ex) {
             System.err.println("[LabStorage] Failed to save security state for " + attemptKey + ": " + ex.getMessage());
         }
@@ -2516,12 +2528,18 @@ public final class LabServer {
 
     private static void saveRecoveryToDisk() {
         try {
-            Path trfFile = SUBMISSIONS_DIR.resolve("recovery_transfers.json");
-            Files.writeString(trfFile, Json.stringify(RuntimeState.sessionTransfers), StandardCharsets.UTF_8);
-            Path auditFile = SUBMISSIONS_DIR.resolve("recovery_audit.json");
-            Files.writeString(auditFile, Json.stringify(RuntimeState.recoveryAuditLogs), StandardCharsets.UTF_8);
+            writeJsonAtomically(SUBMISSIONS_DIR.resolve("recovery_transfers.json"), RuntimeState.sessionTransfers);
+            writeJsonAtomically(SUBMISSIONS_DIR.resolve("recovery_audit.json"), RuntimeState.recoveryAuditLogs);
         } catch (Exception ex) {
             System.err.println("[LabStorage] Failed to save recovery history: " + ex.getMessage());
+        }
+    }
+
+    private static void saveSuspiciousEventsToDisk() {
+        try {
+            writeJsonAtomically(SUBMISSIONS_DIR.resolve("suspicious_events.json"), RuntimeState.suspiciousEvents);
+        } catch (Exception ex) {
+            System.err.println("[LabStorage] Failed to save security events: " + ex.getMessage());
         }
     }
 
@@ -3400,6 +3418,7 @@ public final class LabServer {
         rec.put("examinationCode", "EXAM-" + RuntimeState.activeSessionId);
         rec.put("sittingName", RuntimeState.activeSittingName != null ? RuntimeState.activeSittingName : "MORNING");
         RuntimeState.suspiciousEvents.add(rec);
+        saveSuspiciousEventsToDisk();
         return Json.stringify(rec);
     }
 
