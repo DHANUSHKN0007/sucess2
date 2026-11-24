@@ -3,6 +3,9 @@
 
 This guide describes how to run the complete Examination Management System (all 3 web portals, Central Java Backend, Independent Lab Server, and PostgreSQL database) on a single Windows laptop after cloning the repository.
 
+> This guide is for **local development**. To run a real exam, use [DEPLOYMENT.md](DEPLOYMENT.md) instead: it has its
+> own setup and start scripts, keeps every service on 127.0.0.1, and publishes only the gateway through Tailscale.
+
 ---
 
 ### Prerequisites

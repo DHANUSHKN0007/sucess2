@@ -1,5 +1,203 @@
 # Deployment
 
+Goal: someone who did not write this code pulls the repo, runs two scripts, pastes one Tailscale command, and a
+safe exam is reachable from students' browsers. All answers stay on the host PC.
+
+```
+git pull
+.\deploy\setup.ps1          # once per machine
+.\deploy\start-exam.ps1     # each exam: checks, starts, PRINTS the tailscale command
+<paste the printed tailscale command>
+.\deploy\stop-exam.ps1      # when the sitting ends
+```
+
+On Linux or macOS use `./deploy/setup.sh`, `./deploy/start-exam.sh` and `./deploy/stop-exam.sh`. The `.sh` scripts
+have not been run by the authors; the PowerShell scripts are the primary path.
+
+Read these three statements before anything else:
+
+- **The Funnel URL is public and appears in Certificate Transparency logs.** Access control is the student login,
+  never the secrecy of the URL.
+- **Fullscreen and DevTools controls in the student portal are deterrents, not locks.** A determined candidate with
+  physical control of a browser can defeat them; the server records violations and refuses answers from a locked
+  session, but it cannot stop someone reading the screen.
+- **The student credential is open.** See "Student login is an open credential" below.
+
+## Prerequisites
+
+| Need | Version | Why |
+|---|---|---|
+| Windows 10/11 (or Linux/macOS) | | The host PC. Wired network and mains power for the sitting. |
+| Node.js | 18 or newer | Builds the portals; runs the gateway. |
+| JDK (not just a JRE) | 17 or newer | Compiles and runs the central backend and the lab server. |
+| PostgreSQL | 14 or newer (the scripts look for 16 first) | **Required.** See below. |
+| Tailscale | current; the Funnel syntax below was checked against 1.104.7 | The only way in from outside. |
+| Python 3 | any | `setup.sh` only, to hash the instructor password. |
+
+**PostgreSQL is required.** It must be installed, running on this PC, and reachable at the `DB_URL` in `.env` before
+`start-exam` will run. The central backend (which builds exam packages and answers the COE and admin portals) reads and
+writes it. The lab server itself keeps students' sessions and answers as files under `CampusExam\lab_storage`, not in
+PostgreSQL. `deploy\preflight.ps1` fails with "PostgreSQL does not answer" when it is down.
+
+## One-time Tailscale admin-console steps
+
+Do these once per tailnet, signed in to the Tailscale admin console as an admin. They are taken from Tailscale's own
+pages (https://tailscale.com/kb/1153/enabling-https and https://tailscale.com/kb/1223/funnel, read 2026-11-24); if the
+console looks different, follow those pages, not this list.
+
+1. Open the **DNS** page (https://console.tailscale.com/admin/dns). Make sure **MagicDNS** is enabled.
+2. Under **HTTPS Certificates**, select **Enable HTTPS** and acknowledge that your machine names and your tailnet DNS
+   name are published on a public ledger. Do not enable it if any machine name in the tailnet is sensitive.
+3. Open **Access controls**. Expand the **Funnel** section and select **Add Funnel to policy**. This adds the default
+   `nodeAttrs` section to the policy file and saves it. The result looks like this (the policy file accepts trailing
+   commas):
+
+   ```json
+   "nodeAttrs": [
+     {
+       "target": ["autogroup:member"],
+       "attr":   ["funnel"],
+     },
+   ],
+   ```
+
+   `autogroup:member` lets every member of the tailnet use Funnel; narrow `target` if you want fewer.
+4. Sign in to Tailscale on the host PC.
+
+Funnel can only listen on ports 443, 8443 and 10000. The command `start-exam` prints uses the default, so the student
+URL has no port number. `deploy\preflight.ps1` checks that Tailscale is running, that MagicDNS and HTTPS are on, and
+that this PC has the `funnel` attribute.
+
+## One-time setup
+
+```
+.\deploy\setup.ps1
+```
+
+It checks that Node.js, a JDK, PostgreSQL and Tailscale are installed (and says where to get any that are missing),
+creates `.env` from `.env.example` only if it is absent, generates `JWT_SECRET`, creates the instructor login, installs
+the npm packages, builds the student portal, compiles the Java, and offers to initialise the database. Running it again
+keeps every value already in `.env`.
+
+- **Instructor (invigilator) login.** Setup writes `LAB_INSTRUCTOR_USERNAME` (default `invigilator`) and
+  `LAB_INSTRUCTOR_PASSWORD_HASH` into `.env`, used by both the lab server and the central backend, and **prints the
+  generated password once**. Nothing stores it: write it down then. To replace it, delete both `LAB_INSTRUCTOR_*` lines
+  from `.env` and run setup again. `start-exam` refuses to start if either is missing.
+- **Database.** Setup asks before touching it (`-Yes` answers for you, `-SkipDatabase` skips it). It runs
+  `init_database.ps1`, which creates the role and database from `.env` if they are missing and loads
+  `CampusExam\database_dump.sql` only into a database that has no `account` table. The dump contains DROP statements,
+  which is why there is a question. You may be asked for the PostgreSQL administrator password.
+- `.env` is never committed: it is in `.gitignore` along with `lab_storage/`, `*.key`, `*.pem` and `node_modules/`.
+
+## Per-exam checklist
+
+Before the students arrive:
+
+- [ ] Host PC on mains power and on a **wired** network. Sleep and hibernate off (preflight checks this; to fix, run
+      `powercfg /change standby-timeout-ac 0` and `powercfg /change hibernate-timeout-ac 0`).
+- [ ] The host clock and time zone are right. The lab server's clock is the only clock; students cannot change it.
+- [ ] PostgreSQL running.
+- [ ] `.\deploy\start-exam.ps1` finishes and prints the Tailscale command. Do not run that command yet.
+- [ ] **The exam package is loaded and activated through the COE portal** (`http://127.0.0.1:3001` on this PC)
+      **before any student logs in**: the COE portal sends the sitting's signed, encrypted package to this lab server,
+      where it is then activated. Check that it landed: open `http://127.0.0.1:8082/health` on the host PC and confirm
+      the package and cohort counts are not zero. A student who is not on that package's roster cannot log in.
+- [ ] **Hand-outs** (next section): the invigilator unlock password for each sitting, and the instructor login.
+- [ ] Run the printed `tailscale funnel --bg <port>` command.
+- [ ] **Verify from a phone on mobile data**, not on the college Wi-Fi. Open the URL `start-exam` printed: the login
+      page must load. Open `<URL>/api/health`: it must answer with a small JSON object containing `ok`. Open
+      `<URL>/api/results/download`: it must be a 404, never a download.
+
+### Hand-outs: exam code, unlock password, instructor login
+
+| What | Where it comes from | Who gets it | Notes |
+|---|---|---|---|
+| **Examination code** (looks like `EXAM-CS501-12`) | Shown by the COE portal and by the lab server's monitoring | Invigilators, so they can identify the sitting | **Students are not asked for it and nothing checks it.** The student login takes USN, date of birth and computer number only, so announcing the code does not restrict who can log in. A per-sitting exam code as a third login field is described in `TAILSCALE_HARDENING_PROMPT.md` (Phase 3, item 6) and is **not built**. |
+| **Invigilator unlock password** | Generated per sitting in the COE portal (session unlock credential). It is shown **once**; only a salted verifier is synced to the lab server | The invigilator in each lab, in person or by a channel that is not the exam URL's | Typed by the invigilator on a student's screen after a security lock. Three wrong tries lock that student's session permanently until the Chief Invigilator overrides. If it is lost, generate a new one in the COE portal; the old one stops working. |
+| **Instructor login** (ID and password) | Created by `setup.ps1`; the password is shown once | The invigilators who may approve a student's re-login on another PC after a crash | Used from the "Invigilator sign-in" link on the student login page, at a PC the invigilator is standing at. |
+
+### Student login is an open credential
+
+A student signs in with USN, date of birth and a computer number. USNs follow a pattern and dates of birth are known to
+classmates, so **neither is a secret**. Once the URL is public, anyone who learns a classmate's USN and date of birth
+can try to sign in as them from anywhere. What the system does about it:
+
+- Only USNs on the activated package's roster can log in, and a wrong date of birth and an unknown USN get the same
+  reply.
+- Five failed logins for one USN lock it for 60 seconds. Ten failed logins from one source in a minute get
+  `429 RATE_LIMITED`. Behind Funnel the gateway also limits failed logins per client address when it can trust one
+  (see "Gateway" below).
+- Login is allowed only from 30 minutes before the scheduled start.
+- One active candidate per computer number (`409 WORKSTATION_IN_USE`).
+
+What it does **not** do is prove that the person typing is the student. The invigilators in the room are the control:
+do not run an unsupervised sitting on this system.
+
+## Start
+
+```
+.\deploy\start-exam.ps1
+```
+
+It stops with a plain-English message if anything is wrong. In order: `.env` complete, including the instructor login;
+preflight; every `.env` value is exported into each service it starts; the central backend, lab server, gateway, COE
+portal and admin portal start, each bound to `127.0.0.1`; it waits for `/api/health` **through the gateway**; it asks
+the operating system what is actually listening and stops everything if any service is bound beyond `127.0.0.1`. Then
+it **prints, and never runs,** the Tailscale command and the student URL:
+
+```
+tailscale funnel --bg 3002
+```
+
+The port is always the **gateway** port (`GATEWAY_PORT`, default 3002), never the lab server's 8082 (see "Point
+Tailscale at the gateway port only" below). Service logs are in `CampusExam\lab_storage\logs\`.
+
+`preflight.ps1` refuses to start when: `.env` lacks a required value; `JWT_SECRET` is missing or under 32 characters;
+`LAB_TEST_MODE`, `LAB_STAFF_ALLOW_REMOTE` or `ALLOW_SAMPLE_EXAM` is `true`; `BIND` or `LAB_BIND` is not loopback; any
+exam port, or the Node backend's port 8080, is listening on anything other than `127.0.0.1`; an exam port is already in
+use; the student portal is not built or has `.map` files; PostgreSQL does not answer; `lab_storage` or `BACKUP_DIR` is
+not writable; the PC sleeps on mains power; or Tailscale is not running with MagicDNS, HTTPS and Funnel. Run it alone
+with `.\deploy\preflight.ps1`.
+
+The Node backend (`backend/server.js`, port 8080) is not part of an exam and `start-exam` does not start it. Its code
+listens on `0.0.0.0`, so if it is running when you start an exam, preflight refuses until you stop it.
+
+## During the exam
+
+- The admin and COE portals are on this PC's localhost only: `http://127.0.0.1:3000` and `http://127.0.0.1:3001`.
+  Remote staff access through `tailscale serve` is optional, is not set up by these scripts, and must never be public.
+- A student PC that crashes: the invigilator uses "Invigilator sign-in" on the student login page with the instructor
+  login (the in-console recovery screen opens) and approves a re-login on another computer.
+- A locked screen: the invigilator types the unlock password for that sitting.
+- Restarting the lab server logs every instructor out. Sessions and answers are saved to `lab_storage` as they change
+  and are reloaded on start, but a mid-exam restart has not been exercised end to end, so avoid one.
+
+## Stop, export and back up
+
+```
+.\deploy\stop-exam.ps1
+```
+
+It runs `tailscale funnel reset`, stops every service, confirms nothing is still listening, and reminds you to export
+and back up. **Export the results from the COE portal before you stop**, because stopping takes the lab server and the
+COE portal down (if you forgot, run `start-exam` again and do not run its Tailscale command). Then copy
+`CampusExam\lab_storage` to `BACKUP_DIR` (default `backups\`) and keep it until the results are approved.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `409 WORKSTATION_IN_USE` at student login | That computer number is bound to another candidate whose session is still active. | Ask the invigilator. Pick a free computer number, have the other candidate submit (that frees the number), or use "Invigilator sign-in" to move a crashed session. |
+| Blank white page, or the browser console says "mixed content" | The portal was built with an `http://` API address, which the browser refuses to call from an `https://` page. | The production build must be same-origin: `VITE_API_URL` and `VITE_LAB_API_BASE_URL` empty in the student portal's `.env.production`. Run `.\deploy\setup.ps1`, then `.\deploy\start-exam.ps1` (the gateway reads the portal when it starts). |
+| `502 LAB_SERVER_UNAVAILABLE` from the gateway (`504 GATEWAY_TIMEOUT` if it is slow) | The gateway is up but the lab server is not answering. | Read `CampusExam\lab_storage\logs\lab-server.err.log`, then stop and start again. |
+| The Tailscale command says Funnel is not enabled, or preflight says "not allowed to use Funnel" | The `funnel` node attribute or HTTPS is missing in the admin console. | Do the one-time admin-console steps above. |
+| Preflight: "Port N is already in use" | An earlier run, or another program, holds the port. | `.\deploy\stop-exam.ps1`, or end the process named in the message in Task Manager. |
+| Preflight: "PostgreSQL does not answer", or the central backend never opens its port | The PostgreSQL service is stopped, or `DB_URL`, `DB_USER`, `DB_PASSWORD` or `DB_NAME` in `.env` is wrong. | Start the service (Services, `postgresql-x64-NN`) and read `central.err.log`. |
+| Timers wrong, or the exam is "not started yet" or "ended" at the wrong time | The host PC's clock or time zone is wrong. The lab server ignores any time a client sends. | Fix the clock (`w32tm /resync`) and the time zone, then restart the exam services. |
+| `start-exam` says the instructor login is missing | `LAB_INSTRUCTOR_USERNAME` or `LAB_INSTRUCTOR_PASSWORD_HASH` is empty in `.env`. | Run `.\deploy\setup.ps1`; it prints a new password once. |
+
+The route classification, gateway allowlist and environment variables below are reference material.
+
 ## Lab server route classification
 
 Source: `dispatch()` in `CampusExam/LabServer.java`. Every route answers under the
@@ -129,5 +327,5 @@ server adds the address to its login limiter keys. With none, the gateway sends 
 the lab server's 8082. Tailscale forwards from this host, so a tunnel aimed at 8082 reaches the lab server as a
 loopback caller with no `X-Gateway-Origin` header, and `requireLocalStaff` treats it as local: the LOCAL STAFF
 routes (`results/download`, `monitoring/*`, `labs/*`, ...) would be open to the internet. Only the gateway adds
-`X-Gateway-Origin` and limits `/api` to the allowlist above. The exact `tailscale` flags are to be verified on the
-target machine with `tailscale funnel --help`.
+`X-Gateway-Origin` and limits `/api` to the allowlist above. The syntax `tailscale funnel --bg <port>` was checked
+against `tailscale funnel --help` on Tailscale 1.104.7; check it on your own version too.

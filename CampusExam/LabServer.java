@@ -237,8 +237,10 @@ public final class LabServer {
             KeyPair pair = kpg.generateKeyPair();
             labPrivateKey = pair.getPrivate();
             labPublicKey = pair.getPublic();
-            Files.write(labPrivPath, labPrivateKey.getEncoded());
-            Files.write(labPubPath, labPublicKey.getEncoded());
+            // Public first, private last: startup loads the pair only when both files exist, so a crash between the
+            // two writes regenerates the pair instead of loading a private key whose public half is missing or stale.
+            writeBytesAtomically(labPubPath, labPublicKey.getEncoded());
+            writeBytesAtomically(labPrivPath, labPrivateKey.getEncoded());
         }
 
         if (Files.exists(centralPubPath)) {
@@ -425,6 +427,8 @@ public final class LabServer {
                             loadEventList(p, RuntimeState.sessionTransfers);
                         } else if (fileName.equals("recovery_audit.json")) {
                             loadEventList(p, RuntimeState.recoveryAuditLogs);
+                        } else if (fileName.equals("recovery_pc_events.json")) {
+                            loadEventList(p, RuntimeState.pcRecoveryEvents);
                         } else if (fileName.equals("suspicious_events.json")) {
                             loadEventList(p, RuntimeState.suspiciousEvents);
                         }
@@ -1793,6 +1797,19 @@ public final class LabServer {
         return Json.stringify(resp);
     }
 
+    // Same lookup handleStudentSaveAnswers enforces, so the state a client sees is the state the server acts on.
+    private static boolean isStudentLocked(Map<String, Object> sess, String usn, long examId) {
+        String sittingName = String.valueOf(sess.getOrDefault("sittingName", RuntimeState.activeSittingName != null ? RuntimeState.activeSittingName : ""));
+        Map<String, Object> lock = RuntimeState.studentLockStates.get(getAttemptLockKey(examId, sittingName, usn));
+        if (lock == null) {
+            Map<String, Object> legacy = RuntimeState.studentLockStates.get(usn);
+            if (legacy != null && String.valueOf(examId).equals(String.valueOf(legacy.get("examinationId")))) {
+                lock = legacy;
+            }
+        }
+        return lock != null && Boolean.TRUE.equals(lock.get("isLocked"));
+    }
+
     private static String handleStudentState(HttpExchange exchange) {
         Map<String, Object> sess = requireStudentSession(exchange);
         String usn = (String) sess.get("usn");
@@ -1829,6 +1846,7 @@ public final class LabServer {
         resp.put("instructionsConfirmed", Boolean.TRUE.equals(sess.get("instructionsConfirmed")));
         resp.put("examStarted", Boolean.TRUE.equals(sess.get("examStarted")));
         resp.put("submitted", Boolean.TRUE.equals(sess.get("submitted")));
+        resp.put("isLocked", isStudentLocked(sess, usn, examId));
         resp.put("serverTimestampMs", now);
         resp.put("examExpiresAtMs", expiresAt);
         resp.put("remainingSeconds", remainingSeconds);
@@ -2125,24 +2143,18 @@ public final class LabServer {
     }
 
     private static String handleSecurityUnlock(HttpExchange exchange, Map<String, Object> form) throws Exception {
-        String usn = String.valueOf(form.getOrDefault("studentUsn", "")).trim().toUpperCase(Locale.ROOT);
-        if (usn.isBlank()) throw new LabException(400, "studentUsn is required", "MISSING_USN");
+        // Identity comes only from the session token; a body studentUsn is ignored. Rejecting here, before any lock
+        // state is touched, means a request with no valid token can neither burn nor probe a student's attempts.
+        Map<String, Object> sess = requireStudentSession(exchange);
+        String usn = (String) sess.get("usn");
 
         long examId = parseLongSafe(form.get("examinationId"));
         String sittingName = String.valueOf(form.getOrDefault("sittingName", form.getOrDefault("sittingCode", ""))).trim().toUpperCase(Locale.ROOT);
 
-        // Deduce student's examination and sitting from active runtime state
-        if (examId <= 0 || sittingName.isBlank()) {
-            String token = RuntimeState.usnToSessionToken.get(usn);
-            if (token != null) {
-                Map<String, Object> sess = RuntimeState.studentSessions.get(token);
-                if (sess != null) {
-                    if (examId <= 0) examId = parseLongSafe(sess.get("examinationId"));
-                    if (examId <= 0) examId = parseLongSafe(sess.get("sessionId"));
-                    if (sittingName.isBlank()) sittingName = String.valueOf(sess.getOrDefault("sittingName", sess.getOrDefault("sittingCode", ""))).trim().toUpperCase(Locale.ROOT);
-                }
-            }
-        }
+        // Deduce student's examination and sitting from the session
+        if (examId <= 0) examId = parseLongSafe(sess.get("examinationId"));
+        if (examId <= 0) examId = parseLongSafe(sess.get("sessionId"));
+        if (sittingName.isBlank()) sittingName = String.valueOf(sess.getOrDefault("sittingName", sess.getOrDefault("sittingCode", ""))).trim().toUpperCase(Locale.ROOT);
         if (examId <= 0 && RuntimeState.activeSessionId != null) {
             examId = RuntimeState.activeSessionId;
         }
@@ -2163,15 +2175,6 @@ public final class LabServer {
             lock.put("isPermanentlyLocked", true);
             saveSecurityToDisk(attemptKey, lock);
             RuntimeState.studentLockStates.put(usn, lock);
-
-            try {
-                broadcastSseEvent("student_unlocked", Map.of(
-                    "eventType", "STUDENT_UNLOCKED",
-                    "usn", usn,
-                    "sessionId", String.valueOf(examId),
-                    "timestamp", Instant.now().toString()
-                ));
-            } catch (Exception ignored) {}
             throw new LabException(403, "Maximum authorization attempts exceeded (3/3). This session is permanently locked. Chief Invigilator administrative override required.", "PERMANENT_LOCK");
         }
 
@@ -2275,15 +2278,6 @@ public final class LabServer {
             if (failed >= 3) lock.put("isPermanentlyLocked", true);
             saveSecurityToDisk(attemptKey, lock);
             RuntimeState.studentLockStates.put(usn, lock);
-
-            try {
-                broadcastSseEvent("student_unlocked", Map.of(
-                    "eventType", "STUDENT_UNLOCKED",
-                    "usn", usn,
-                    "sessionId", String.valueOf(examId),
-                    "timestamp", Instant.now().toString()
-                ));
-            } catch (Exception ignored) {}
 
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("success", false);
@@ -2433,10 +2427,14 @@ public final class LabServer {
     // A crash mid-write leaves the previous file intact: the new content is forced to disk in a sibling .tmp first
     // and only then swapped in. Leftover .tmp files match no loader suffix, so startup ignores them.
     private static void writeJsonAtomically(Path target, Object doc) throws IOException {
+        writeBytesAtomically(target, Json.stringify(doc).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void writeBytesAtomically(Path target, byte[] data) throws IOException {
         Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
         synchronized (DISK_LOCK) {
-            Files.writeString(tmp, Json.stringify(doc), StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.SYNC);
+            Files.write(tmp, data,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.SYNC, StandardOpenOption.WRITE);
             try {
                 Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException e) {
@@ -2530,6 +2528,7 @@ public final class LabServer {
         try {
             writeJsonAtomically(SUBMISSIONS_DIR.resolve("recovery_transfers.json"), RuntimeState.sessionTransfers);
             writeJsonAtomically(SUBMISSIONS_DIR.resolve("recovery_audit.json"), RuntimeState.recoveryAuditLogs);
+            writeJsonAtomically(SUBMISSIONS_DIR.resolve("recovery_pc_events.json"), RuntimeState.pcRecoveryEvents);
         } catch (Exception ex) {
             System.err.println("[LabStorage] Failed to save recovery history: " + ex.getMessage());
         }

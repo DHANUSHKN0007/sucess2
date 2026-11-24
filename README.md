@@ -3,6 +3,10 @@
 
 A comprehensive, offline-first examination management platform designed for autonomous engineering institutions. Built with zero cloud runtime dependencies, air-gapped cryptographic validation, multi-department shared laboratory delivery, and synchronized offline lab servers.
 
+> **Running a real exam?** Follow [DEPLOYMENT.md](DEPLOYMENT.md) (`deploy\setup.ps1`, `deploy\start-exam.ps1`). It keeps every
+> service on 127.0.0.1 and publishes only the gateway through Tailscale. The Quickstart below is for
+> local development, and `-Mode LAN` (section 8) opens the services to the whole network; neither is for a real sitting.
+
 ---
 
 ## 1. System Architecture
@@ -187,6 +191,9 @@ The system enforces strict cryptographic isolation between Central Backend and L
 ---
 
 ## 8. Multi-Laptop LAN Arrangement (Lab Deployment)
+
+> **Development and trials only.** `-Mode LAN` binds to 0.0.0.0 and the firewall rule below opens the ports to the whole
+> network. For a real exam use [DEPLOYMENT.md](DEPLOYMENT.md), where nothing listens beyond 127.0.0.1.
 
 To run the examination system across physical workstations in a computer laboratory:
 

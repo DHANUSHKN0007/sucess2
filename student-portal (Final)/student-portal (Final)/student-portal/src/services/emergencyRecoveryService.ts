@@ -104,7 +104,6 @@ export const emergencyRecoveryService = {
       workstationId: workstationService.getWorkstationId(),
     });
     sessionStorage.setItem(STORAGE_KEYS.INSTRUCTOR_TOKEN, res.token);
-    localStorage.setItem(STORAGE_KEYS.INSTRUCTOR_TOKEN, res.token);
     return res;
   },
 
@@ -115,17 +114,13 @@ export const emergencyRecoveryService = {
       // Ignore network errors on logout
     } finally {
       sessionStorage.removeItem(STORAGE_KEYS.INSTRUCTOR_TOKEN);
-      localStorage.removeItem(STORAGE_KEYS.INSTRUCTOR_TOKEN);
     }
   },
 
   isInstructorAuthenticated(): boolean {
     if (typeof window === 'undefined') return false;
     try {
-      return Boolean(
-        sessionStorage.getItem(STORAGE_KEYS.INSTRUCTOR_TOKEN) ||
-          localStorage.getItem(STORAGE_KEYS.INSTRUCTOR_TOKEN)
-      );
+      return Boolean(sessionStorage.getItem(STORAGE_KEYS.INSTRUCTOR_TOKEN));
     } catch {
       return false;
     }

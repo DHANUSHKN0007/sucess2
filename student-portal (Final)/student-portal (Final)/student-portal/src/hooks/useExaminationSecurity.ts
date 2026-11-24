@@ -62,9 +62,16 @@ export function useExaminationSecurity({
   );
 
   useEffect(() => {
-    if (student?.usn && examSession?.examinationId) {
-      setLockState(securityService.getLockState(attemptScope));
-    }
+    if (!(student?.usn && examSession?.examinationId)) return;
+    let cancelled = false;
+    setLockState(securityService.getLockState(attemptScope));
+    // The server's lock overrides localStorage, which the candidate can clear.
+    void securityService.syncLockFromServer(attemptScope).then((synced) => {
+      if (!cancelled) setLockState(synced);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [attemptScope, student?.usn, examSession?.examinationId]);
 
   const [isVerifying, setIsVerifying] = useState(false);

@@ -215,6 +215,7 @@ export interface ExamRuntimeStateResponse {
   instructionsConfirmed: boolean;
   examStarted: boolean;
   submitted: boolean;
+  isLocked?: boolean;
   serverTimestampMs: number;
   examExpiresAtMs: number;
   remainingSeconds: number;

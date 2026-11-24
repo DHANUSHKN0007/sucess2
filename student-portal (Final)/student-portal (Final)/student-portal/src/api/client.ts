@@ -79,6 +79,14 @@ export class ApiClient {
 
     this.baseUrl = resolvedUrl.replace(/\/+$/, '');
 
+    // Earlier builds kept the instructor token in localStorage, where it outlived the tab and the sitting. It lives in
+    // sessionStorage only now, so drop any copy a shared lab PC still holds.
+    try {
+      localStorage.removeItem(INSTRUCTOR_TOKEN_KEY);
+    } catch {
+      // Storage can be blocked; nothing to clean up then.
+    }
+
     this.defaultTimeoutMs = Number(
       (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_TIMEOUT_MS) || 8000
     );
@@ -133,8 +141,7 @@ export class ApiClient {
     try {
       return (
         sessionStorage.getItem(ACTIVE_STUDENT_TOKEN_KEY) ||
-        sessionStorage.getItem(INSTRUCTOR_TOKEN_KEY) ||
-        localStorage.getItem(INSTRUCTOR_TOKEN_KEY)
+        sessionStorage.getItem(INSTRUCTOR_TOKEN_KEY)
       );
     } catch {
       return null;
@@ -149,7 +156,7 @@ export class ApiClient {
   private getTokenForUrl(url: string): string | null {
     if (INSTRUCTOR_ROUTE.test(url)) {
       try {
-        return sessionStorage.getItem(INSTRUCTOR_TOKEN_KEY) || localStorage.getItem(INSTRUCTOR_TOKEN_KEY);
+        return sessionStorage.getItem(INSTRUCTOR_TOKEN_KEY);
       } catch {
         return null;
       }

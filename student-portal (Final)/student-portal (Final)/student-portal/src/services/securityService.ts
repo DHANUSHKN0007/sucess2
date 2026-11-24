@@ -10,6 +10,7 @@ import {
   SecurityViolationType,
 } from '../types/security';
 import { apiClient } from '../api/client';
+import { timerService } from './timerService';
 
 export const INVIGILATOR_SECRET_PASSWORD = ''; // Deprecated: Authoritative COE-generated credential verification only
 export const MAX_INVIGILATOR_ATTEMPTS = 3;
@@ -80,6 +81,24 @@ export const securityService = {
       return JSON.parse(raw) as SecurityLockState;
     } catch {
       return { ...INITIAL_LOCK_STATE };
+    }
+  },
+
+  // The server's lock is the real one: localStorage can be cleared by the candidate, so a lock the server reports is
+  // restored locally. The local state is re-read after the request so a violation raised meanwhile is never overwritten.
+  // A server that says "unlocked" does not clear a local lock, because the violation report may still be in flight.
+  async syncLockFromServer(scope: AttemptScope): Promise<SecurityLockState> {
+    try {
+      const server = await timerService.fetchAuthoritativeState();
+      const local = this.getLockState(scope);
+      if (server.isLocked && !local.isLocked) {
+        const restored: SecurityLockState = { ...local, isLocked: true, lockedAtMs: local.lockedAtMs ?? Date.now() };
+        this.saveLockState(restored, scope);
+        return restored;
+      }
+      return local;
+    } catch {
+      return this.getLockState(scope);
     }
   },
 
@@ -289,7 +308,8 @@ export const securityService = {
             err.message.toLowerCase().includes('timed out') ||
             err.message.toLowerCase().includes('reach')));
 
-      if (isNetwork) {
+      // 401 means the session token was missing or expired; the server consumed no attempt, so neither may the portal.
+      if (isNetwork || err?.statusCode === 401) {
         // Network failures MUST NOT increment failedAttempts or permanently lock students
         return {
           success: false,
