@@ -91,7 +91,8 @@ def main():
 
     # Activate session 20 for test
     try:
-        http_req(f"{LAB_URL}/lab-api/packages/activate", method="POST", data={"examinationId": 20})
+        _, setup_inst = json_req(f"{LAB_URL}/api/instructor/login", method="POST", data={"recoveryId": "EMGR-LOGIN-01", "recoveryKey": "ProTick-0011"})
+        http_req(f"{LAB_URL}/lab-api/packages/activate", method="POST", data={"examinationId": 20}, headers={"Authorization": f"Bearer {setup_inst.get('token')}"})
     except Exception as e:
         print(f"Notice: activate-package error: {e}")
 
@@ -200,7 +201,7 @@ def main():
         "studentUsn": test_usn2,
         "violationType": "TAB_SWITCH",
         "label": "Tab switched away from exam"
-    })
+    }, headers={"Authorization": f"Bearer {sess_token2}"})
     code, mon_sec_res = json_req(f"{LAB_URL}/lab-api/monitoring/sessions")
     sec_events = mon_sec_res[0].get("suspiciousEvents", [])
     t6_pass = any(e.get("studentUsn") == test_usn2 for e in sec_events)
@@ -330,7 +331,7 @@ def main():
     record(19, "Remaining timer preserved (not extended or reset)", t19_pass, f"Remaining seconds: {rem_sec}")
 
     # 20. Recovery history persisted after restart
-    code, transfers_res = json_req(f"{LAB_URL}/api/recovery/transfers")
+    code, transfers_res = json_req(f"{LAB_URL}/api/recovery/transfers", headers={"Authorization": f"Bearer {inst_token}"})
     t20_pass = code == 200 and isinstance(transfers_res, list) and len(transfers_res) >= 1
     record(20, "Recovery history recorded and auditable", t20_pass, f"Total transfers logged: {len(transfers_res) if isinstance(transfers_res, list) else 0}")
 

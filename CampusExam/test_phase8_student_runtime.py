@@ -390,7 +390,7 @@ def main():
             "currentQuestionIndex": 1,
             "remainingSeconds": 5000,
             "answeredCount": 2
-        })
+        }, headers={"Authorization": f"Bearer {t1}"})
         success = code == 200 and v_ack.get("locked") is True and v_ack.get("violationCount") >= 1
         log_test(20, "Browser tab-switch event recording & lock status", success, f"locked: {v_ack.get('locked')}, count: {v_ack.get('violationCount')}")
     except Exception as e:
@@ -428,7 +428,7 @@ def main():
         # Trigger another lock
         http_post(f"{LAB_SERVER_URL}/api/security/violation", {
             "violationType": "WINDOW_BLUR", "label": "Window Blur", "studentUsn": "4MH21CS004", "examinationId": EXAM_ID
-        })
+        }, headers={"Authorization": f"Bearer {t1}"})
         # Try invalid passwords
         failed_attempts_ok = True
         for attempt in range(1, 4):

@@ -9,7 +9,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.*;
@@ -43,6 +46,7 @@ public final class LabServer {
     public static int PORT = 8082;
     public static String BIND = "127.0.0.1";
     public static boolean LAB_TEST_MODE = false;
+    public static boolean LAB_STAFF_ALLOW_REMOTE = false;
     public static Path KEYS_DIR = Path.of("lab_server_keys");
     public static Path STORAGE_DIR = Path.of("lab_storage", "packages");
     public static Path SUBMISSIONS_DIR = Path.of("lab_storage", "submissions");
@@ -116,6 +120,10 @@ public final class LabServer {
             System.out.println("#  WARNING: LAB_TEST_MODE=true -- NOT FOR A REAL EXAMINATION                   #");
             System.out.println("#  Client-supplied clock, start-check bypass and /test/* routes are ENABLED.   #");
             System.out.println("################################################################################");
+        }
+        LAB_STAFF_ALLOW_REMOTE = Boolean.parseBoolean(System.getenv().getOrDefault("LAB_STAFF_ALLOW_REMOTE", "false"));
+        if (LAB_STAFF_ALLOW_REMOTE) {
+            System.out.println("[LabServer] WARNING: LAB_STAFF_ALLOW_REMOTE=true -- unauthenticated staff routes accept non-local callers.");
         }
 
         String customKeys = System.getenv("LAB_KEYS_DIR");
@@ -663,6 +671,7 @@ public final class LabServer {
 
         // Lab Server Identity & Nodes
         if ((normPath.equals("labs/servers") || normPath.equals("labs/server") || normPath.matches("(v1/)?labs/servers?")) && "GET".equals(method)) {
+            requireLocalStaff(exchange);
             return handleLabServersNode();
         }
 
@@ -674,11 +683,13 @@ public final class LabServer {
 
         // 2. Package Receipt Query
         if ((normPath.equals("package/receipt") || normPath.matches("(v1/)?labs/examinations/\\d+/sittings/[^/]+/package-receipt")) && "GET".equals(method)) {
+            requireLocalStaff(exchange);
             return handlePackageReceipt(exchange.getRequestURI().getQuery(), path);
         }
 
         // 3. Package List Query
         if (normPath.equals("package/list") && "GET".equals(method)) {
+            requireInstructor(exchange);
             List<Map<String, Object>> list = new ArrayList<>();
             for (Map<String, Object> p : RuntimeState.packages.values()) {
                 Map<String, Object> item = new LinkedHashMap<>();
@@ -696,6 +707,7 @@ public final class LabServer {
 
         // 4. Manual Package Import from local file
         if (normPath.equals("package/manual-import") && "POST".equals(method)) {
+            requireInstructor(exchange);
             return handleManualImport(form);
         }
 
@@ -759,11 +771,13 @@ public final class LabServer {
 
         // --- PHASE 9: LIVE MONITORING TELEMETRY ---
         if ((normPath.equals("monitoring/sessions") || normPath.startsWith("monitoring/sessions/")) && "GET".equals(method)) {
+            requireLocalStaff(exchange);
             return handleMonitoringSessions(exchange, normPath);
         }
 
         // --- PHASE 9: LIVE MONITORING STREAM (SSE) ---
         if ((normPath.equals("monitoring/stream") || normPath.equals("monitoring/events") || normPath.equals("lab-api/monitoring/stream") || normPath.equals("api/v1/monitoring/events")) && "GET".equals(method)) {
+            requireLocalStaff(exchange);
             return handleMonitoringStream(exchange);
         }
 
@@ -777,6 +791,7 @@ public final class LabServer {
 
         // --- PHASE 9: REAL PC CRASH RECOVERY ---
         if (normPath.equals("recovery/relogin-authorisations") && "GET".equals(method)) {
+            requireInstructor(exchange);
             return handleRecoveryReloginList(exchange);
         }
         if (normPath.equals("recovery/relogin-authorisations/approve") && "POST".equals(method)) {
@@ -786,41 +801,53 @@ public final class LabServer {
             return handleRecoveryConsume(exchange, form);
         }
         if (normPath.equals("recovery/overview") && "GET".equals(method)) {
+            requireInstructor(exchange);
             return handleRecoveryOverview(exchange);
         }
         if (normPath.equals("recovery/transfers") && "GET".equals(method)) {
+            requireInstructor(exchange);
             return handleRecoveryTransfers(exchange);
         }
         if (normPath.equals("recovery/audit-logs") && "GET".equals(method)) {
+            requireInstructor(exchange);
             return handleRecoveryAuditLogs(exchange);
         }
         if (normPath.equals("recovery/config") && "GET".equals(method)) {
+            requireInstructor(exchange);
             return handleRecoveryConfig(exchange);
         }
         if (normPath.equals("recovery/report-crash") && "POST".equals(method)) {
+            requireInstructor(exchange);
             return handleRecoveryReportCrash(exchange, form);
         }
         if (normPath.matches("labs/[^/]+/sittings/[^/]+/pc-recovery") && "POST".equals(method)) {
+            requireLocalStaff(exchange);
             return handleLabPcRecovery(exchange, form, normPath);
         }
         if (normPath.matches("labs/[^/]+/sittings/[^/]+/workstation-bind") && "POST".equals(method)) {
+            requireLocalStaff(exchange);
             return handleLabWorkstationBind(exchange, form);
         }
         if (normPath.matches("monitoring/sessions/[^/]+/unlock-event") && "POST".equals(method)) {
+            requireLocalStaff(exchange);
             return handleRecordUnlockEvent(exchange, form);
         }
         if ((normPath.equals("packages/activate") || normPath.equals("package/activate") || normPath.equals("test/activate-package")) && "POST".equals(method)) {
+            requireInstructor(exchange);
             return handlePackageActivate(exchange, form);
         }
 
         // --- PHASE 9: RESULT FINALIZATION & SIGNED .LABRESULT ARCHIVE GENERATION ---
         if ((normPath.equals("results/finalize") || normPath.equals("results/evaluate-and-export") || normPath.equals("lab/evaluate-and-export")) && "POST".equals(method)) {
+            requireLocalStaff(exchange);
             return handleResultsFinalize(exchange, form);
         }
         if ((normPath.equals("results/download") || normPath.equals("results/package")) && "GET".equals(method)) {
+            requireLocalStaff(exchange);
             return handleResultsDownload(exchange);
         }
         if (normPath.equals("results/transfer-to-central") && "POST".equals(method)) {
+            requireInstructor(exchange);
             return handleResultsTransferToCentral(exchange, form);
         }
 
@@ -2010,14 +2037,8 @@ public final class LabServer {
     }
 
     private static String handleSecurityViolation(HttpExchange exchange, Map<String, Object> form) throws Exception {
-        String usn = String.valueOf(form.getOrDefault("studentUsn", "")).trim().toUpperCase(Locale.ROOT);
-        if (usn.isBlank()) {
-            try {
-                Map<String, Object> sess = requireStudentSession(exchange);
-                usn = (String) sess.get("usn");
-            } catch (Exception ignored) {}
-        }
-        if (usn.isBlank()) throw new LabException(400, "studentUsn is required", "MISSING_USN");
+        // Identity comes only from the session token; a body studentUsn is ignored so one client cannot lock another.
+        String usn = (String) requireStudentSession(exchange).get("usn");
 
         long examId = parseLongSafe(form.get("examinationId"));
         String sittingName = String.valueOf(form.getOrDefault("sittingName", form.getOrDefault("sittingCode", ""))).trim().toUpperCase(Locale.ROOT);
@@ -2901,6 +2922,25 @@ public final class LabServer {
         if (expiresAtMs == null || System.currentTimeMillis() >= expiresAtMs) {
             if (expiresAtMs != null) RuntimeState.instructorSessions.remove(tok);
             throw new LabException(401, "Invalid or expired Lab Instructor token", "UNAUTHORIZED");
+        }
+    }
+
+    // Staff routes that the COE portal and central server call without any credential this server can verify.
+    // They are only safe from this host itself, so refuse other callers and anything forwarded by the gateway.
+    private static void requireLocalStaff(HttpExchange exchange) {
+        if (exchange.getRequestHeaders().getFirst("X-Gateway-Origin") != null) {
+            throw new LabException(403, "This staff route is not available through the gateway", "STAFF_ROUTE_LOCAL_ONLY");
+        }
+        if (LAB_STAFF_ALLOW_REMOTE) return;
+        InetAddress remote = exchange.getRemoteAddress().getAddress();
+        boolean local;
+        try {
+            local = remote.isLoopbackAddress() || NetworkInterface.getByInetAddress(remote) != null;
+        } catch (SocketException e) {
+            local = false;
+        }
+        if (!local) {
+            throw new LabException(403, "This staff route is only available from the lab server host", "STAFF_ROUTE_LOCAL_ONLY");
         }
     }
 
