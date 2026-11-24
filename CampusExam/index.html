@@ -132,10 +132,6 @@
             <label>Date of Birth (YYYY-MM-DD)</label>
             <input type="text" id="studentDob" placeholder="2004-05-15" />
           </div>
-          <div class="form-group">
-            <label>Computer Number</label>
-            <input type="text" id="studentPc" placeholder="PC-01" value="PC-01" />
-          </div>
           <button class="btn btn-success" onclick="loginStudent()">Enter Offline Examination</button>
         </div>
       </div>
@@ -362,11 +358,10 @@
     async function loginStudent() {
       const usn = document.getElementById('studentUsn').value;
       const dob = document.getElementById('studentDob').value;
-      const pc = document.getElementById('studentPc').value;
       const res = await fetch(`${API}/student/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ usn: usn, dob: dob, computer_number: pc }).toString()
+        body: new URLSearchParams({ usn: usn, dob: dob }).toString()
       });
       const data = await res.json();
       if (data.token) {
@@ -374,7 +369,7 @@
         currentRole = 'STUDENT';
         document.getElementById('userDisplay').textContent = `${data.fullName} (${data.usn})`;
         document.getElementById('logoutBtn').classList.remove('hidden');
-        document.getElementById('studentVersionBadge').textContent = `Assigned Version: ${data.assignedVersion} • Workstation: ${data.computerNumber}`;
+        document.getElementById('studentVersionBadge').textContent = `Assigned Version: ${data.assignedVersion}`;
         document.getElementById('studentCandidateTag').textContent = `Candidate: ${data.fullName} (${data.usn})`;
         switchTab('studentExam');
         loadStudentPaper();
