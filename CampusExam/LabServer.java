@@ -37,6 +37,7 @@ import java.util.zip.*;
 public final class LabServer {
 
     public static final SecureRandom RANDOM = new SecureRandom();
+    private static final long INSTRUCTOR_TOKEN_TTL_MS = 8L * 60 * 60 * 1000;
     public static final ZoneId IST_ZONE = ZoneId.of("Asia/Kolkata");
     public static String LAB_ID = "LAB-CSE-01";
     public static int PORT = 8082;
@@ -94,7 +95,7 @@ public final class LabServer {
         // Phase 9: Workstation binding, PC crash recovery, and event history
         public static Map<String, String> workstationBindings = new ConcurrentHashMap<>(); // workstationId -> usn
         public static Map<String, Map<String, Object>> recoveryTokens = new ConcurrentHashMap<>(); // usn -> tokenRecord
-        public static Set<String> instructorSessions = ConcurrentHashMap.newKeySet(); // instructorToken
+        public static Map<String, Long> instructorSessions = new ConcurrentHashMap<>(); // instructorToken -> expiresAtMs
         public static List<Map<String, Object>> sessionTransfers = new CopyOnWriteArrayList<>();
         public static List<Map<String, Object>> recoveryAuditLogs = new CopyOnWriteArrayList<>();
         public static List<Map<String, Object>> suspiciousEvents = new CopyOnWriteArrayList<>();
@@ -2869,8 +2870,10 @@ public final class LabServer {
         if (!valid) {
             throw new LabException(401, "Invalid Lab Instructor Emergency Recovery Credentials. Access Denied.", "INVALID_CREDENTIALS");
         }
-        String token = "INSTR-AUTH-" + System.currentTimeMillis() + "-" + UUID.randomUUID().toString().substring(0, 8);
-        RuntimeState.instructorSessions.add(token);
+        byte[] tokenBytes = new byte[16];
+        RANDOM.nextBytes(tokenBytes);
+        String token = HexFormat.of().formatHex(tokenBytes);
+        RuntimeState.instructorSessions.put(token, System.currentTimeMillis() + INSTRUCTOR_TOKEN_TTL_MS);
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("authenticated", true);
@@ -2894,10 +2897,10 @@ public final class LabServer {
             throw new LabException(401, "Lab Instructor authorization token required", "UNAUTHORIZED");
         }
         String tok = auth.substring(7).trim();
-        if (!RuntimeState.instructorSessions.contains(tok)) {
-            if (!tok.startsWith("INSTR-AUTH-")) {
-                throw new LabException(401, "Invalid or expired Lab Instructor token", "UNAUTHORIZED");
-            }
+        Long expiresAtMs = RuntimeState.instructorSessions.get(tok);
+        if (expiresAtMs == null || System.currentTimeMillis() >= expiresAtMs) {
+            if (expiresAtMs != null) RuntimeState.instructorSessions.remove(tok);
+            throw new LabException(401, "Invalid or expired Lab Instructor token", "UNAUTHORIZED");
         }
     }
 
