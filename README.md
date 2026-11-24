@@ -148,6 +148,13 @@ converter or the COE lab-server screens; use `http://localhost:3000` and `http:/
 - **Students** sign in with USN and date of birth, and only if they are on an activated exam package's roster. The seed
   contains `4MH27CS001` (DOB `2004-01-01`) and `4MH24IS001` (DOB `2004-02-01`) for development.
 
+**Between sittings,** run `.\deploy\stop-exam.ps1` and then `.\deploy\reset-data.ps1` (`./deploy/reset-data.sh` on
+Linux/macOS). It backs up `CampusExam\lab_storage` to `backups\<timestamp>`, then clears the packages, sessions, answers,
+submissions, lock state, recovery history and result exports, and the exam, sitting, schedule, package and
+student-response rows in PostgreSQL. It keeps `.env`, the RSA keys and every account. It asks you to type `WIPE`
+(`-Force` skips that) and refuses while any exam service is running. The database rows are not in the backup. See
+[DEPLOYMENT.md](DEPLOYMENT.md), "Reset between sittings".
+
 *Note: In LAN mode, replace `localhost` with the host computer's LAN IP address (e.g. `http://192.168.1.50:3000`). The frontends automatically resolve backend API addresses relative to the current browser hostname.*
 
 ---

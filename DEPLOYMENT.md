@@ -258,6 +258,29 @@ before you stop**, because stopping takes the lab server and the COE portal down
 if Funnel is still on, the portals are public again as soon as it finishes). Then copy
 `CampusExam\lab_storage` to `BACKUP_DIR` (default `backups\`) and keep it until the results are approved.
 
+## Reset between sittings
+
+```
+.\deploy\stop-exam.ps1
+.\deploy\reset-data.ps1        # ./deploy/reset-data.sh on Linux/macOS
+```
+
+Run it after the results are exported and approved, before the next batch, so nothing from the last sitting carries over.
+It refuses while any exam service is listening, lists exactly what it will clear, and asks you to type `WIPE` (`-Force`,
+or `--force` for the `.sh`, skips that). It then copies `CampusExam\lab_storage` and the result exports to
+`backups\<timestamp>` (under `BACKUP_DIR`), checks the copy, clears the database in one transaction (all or nothing),
+and last empties the folders. It prints what it cleared. If the database cannot be read, nothing is wiped.
+
+| Wiped | Kept untouched |
+|---|---|
+| `lab_storage\packages`, `submissions` (sessions, answers, submissions, lock state, recovery history, suspicious events, PC recovery events), `results`, `credentials` (sitting unlock verifiers); `audit_storage\results` | `.env`, entirely (secrets, database login, instructor and staff hashes) |
+| Database: examination cycles, sessions and sittings, packages and their receipts, results and result imports, per-sitting roster snapshots, unlock credentials, re-login and violation records, computer assignments, generated papers and paper versions, answer-key corrections, and the old exam, assignment, attempt and answer tables (`deploy/reset-data-db.js` lists them) | The RSA keys (`CampusExam\keys`, `CampusExam\lab_server_keys`); staff and student accounts; student rosters, departments, subjects, laboratories, question banks, the audit log; the service logs in `lab_storage\logs` |
+
+The database rows are **not** in the backup; run `pg_dump` first if you may want them back. It never uses `CASCADE`:
+if some table outside its list still references one of these, the database refuses and nothing changes. After a reset the
+COE portal must load and activate a new package before students can log in. The reset only works with the default
+`LAB_STORAGE_DIR` (`lab_storage/packages`) and says so if it is set to anything else.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
