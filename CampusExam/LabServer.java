@@ -1426,6 +1426,23 @@ public final class LabServer {
             }
         }
 
+        // One live attempt per candidate. A browser profile has its own workstation id, so a second window or an incognito tab
+        // looks like another computer; it must not be handed an attempt that is under way. The invigilator moves a candidate
+        // with a PC recovery (which updates assignedWorkstationId) or with an approved re-login: the portal signs in first and
+        // consumes that approval afterwards, so an unused approval has to let this login through.
+        Map<String, Object> approval = RuntimeState.recoveryTokens.get(usn);
+        boolean approvedMove = approval != null && !Boolean.TRUE.equals(approval.get("isOneTimeUsed"))
+                && parseLongSafe(approval.get("expiresAtMs")) > System.currentTimeMillis();
+        if (existingToken != null && comp != null && !comp.isBlank() && !approvedMove) {
+            Map<String, Object> live = RuntimeState.studentSessions.get(existingToken);
+            String liveWs = live != null ? (String) live.get("assignedWorkstationId") : null;
+            long liveExp = live != null ? parseLongSafe(live.get("examExpiresAtMs")) : 0L;
+            boolean running = live != null && Boolean.TRUE.equals(live.get("examStarted")) && (liveExp <= 0 || now < liveExp);
+            if (running && liveWs != null && !liveWs.isBlank() && !liveWs.equalsIgnoreCase(comp)) {
+                throw new LabException(409, "This candidate's examination is already in progress on another computer. Ask your invigilator.", "SESSION_ACTIVE_ELSEWHERE");
+            }
+        }
+
         // Decisions 1 & 5: Shared Authorized Computer Pool & Workstation Safeguards
         // Any computer in the authorized lab may be used by any eligible student regardless of department.
         // Safeguard: One computer cannot host multiple simultaneous active candidate sessions!
@@ -1500,6 +1517,10 @@ public final class LabServer {
 
             RuntimeState.studentSessions.put(token, sess);
             RuntimeState.usnToSessionToken.put(usn, token);
+        } else if ((!Boolean.TRUE.equals(sess.get("examStarted")) || approvedMove) && comp != null && !comp.isBlank()) {
+            // Before the exam starts, or after an invigilator approved the move, the candidate changes computers; the
+            // stored id has to follow, or the next login from the new computer would look like a second one.
+            sess.put("assignedWorkstationId", comp);
         }
         sess.put("availabilityState", availabilityState);
         sess.put("availabilityMessage", availabilityMessage);

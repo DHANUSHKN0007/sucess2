@@ -149,6 +149,11 @@ can try to sign in as them from anywhere. What the system does about it:
   invigilator."). The student portal generates a machine ID on first load, keeps it in the browser's local storage and
   sends it with the login; students never see or type it. It identifies a browser profile, so a second browser profile
   or a private window on the same PC counts as a different computer, and the monitoring screens show IDs like `WS-1A2B3C4D`.
+- One live attempt per candidate (`409 SESSION_ACTIVE_ELSEWHERE`: "This candidate's examination is already in progress on another
+  computer. Ask your invigilator."). After a candidate has started, a login from a different computer or browser profile is
+  refused; the same browser signing in again resumes the same attempt and timer. Before the start a candidate can still
+  change computers. Only an invigilator can move a started candidate to another computer ("Invigilator sign-in" on the
+  login page, then approve that candidate's re-login; the approval is good for 10 minutes).
 
 What it does **not** do is prove that the person typing is the student. The invigilators in the room are the control:
 do not run an unsupervised sitting on this system.
@@ -286,6 +291,7 @@ COE portal must load and activate a new package before students can log in. The 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `409 WORKSTATION_IN_USE` at student login ("Another candidate is still signed in on this computer") | The previous candidate on this PC (this browser profile) has not submitted. | Ask the invigilator. Have the other candidate submit (that frees the computer), or use "Invigilator sign-in" to move a crashed session. |
+| `409 SESSION_ACTIVE_ELSEWHERE` at student login ("already in progress on another computer") | The candidate started the exam in one browser profile and is signing in from another: a private window, another browser, or the same browser after its site data was cleared. | Ask the invigilator to use "Invigilator sign-in" in the browser the candidate is now using and approve the candidate's re-login. The candidate signs in again within 10 minutes and resumes the same attempt and timer. |
 | Blank white page, or the browser console says "mixed content" | The portal was built with an `http://` API address, which the browser refuses to call from an `https://` page. | The production build must be same-origin: `VITE_API_URL` and `VITE_LAB_API_BASE_URL` empty in the student portal's `.env.production`. Run `.\deploy\setup.ps1`, then `.\deploy\start-exam.ps1` (the gateway reads the portal when it starts). |
 | `502 LAB_SERVER_UNAVAILABLE` from the gateway (`504 GATEWAY_TIMEOUT` if it is slow) | The gateway is up but the lab server is not answering. | Read `CampusExam\lab_storage\logs\lab-server.err.log`, then stop and start again. |
 | The Tailscale command says Funnel is not enabled, or preflight says "not allowed to use Funnel" | The `funnel` node attribute or HTTPS is missing in the admin console. | Do the one-time admin-console steps above. |
