@@ -57,6 +57,19 @@ else
     done_ "Instructor login is already in .env. To replace it, delete both LAB_INSTRUCTOR_* lines and run setup again."
 fi
 
+# The admin and COE portals are public, and these accounts have no built-in password: each hash goes into .env and the
+# password is shown once here because nothing stores it.
+for staff in admin coe; do
+    var="STAFF_PASSWORD_HASH_$(printf '%s' "$staff" | tr '[:lower:]' '[:upper:]')"
+    if [ -z "${!var}" ]; then
+        echo "  Creating the $staff login. The password below is shown ONCE and stored nowhere: write it down now."
+        "$DEPLOY_DIR/set-staff-password.sh" "$staff" || exit 1
+        done_ "The $staff login saved to .env."
+    else
+        done_ "The $staff login is already in .env. To change it: ./deploy/set-staff-password.sh $staff"
+    fi
+done
+
 # 3. Folders the services write into.
 step "[3/7] Creating storage folders..."
 mkdir -p "$REPO_ROOT/CampusExam/build_dev" "$REPO_ROOT/CampusExam/keys" "$REPO_ROOT/CampusExam/lab_server_keys" \
@@ -68,7 +81,8 @@ done_ "Folders ready."
 # 4. Packages.
 step "[4/7] Installing packages (a few minutes the first time)..."
 STUDENT_DIR="$REPO_ROOT/student-portal (Final)/student-portal (Final)/student-portal"
-for dir in "$REPO_ROOT/admin-portal (7)" "$REPO_ROOT/coe-portal (7)" "$STUDENT_DIR"; do
+# backend/ supplies the pg driver that preflight uses to check the demo staff passwords.
+for dir in "$REPO_ROOT/admin-portal (7)" "$REPO_ROOT/coe-portal (7)" "$STUDENT_DIR" "$REPO_ROOT/backend"; do
     if ! (cd "$dir" && npm ci --legacy-peer-deps --no-audit --prefer-offline); then
         echo "  [WARN] npm ci failed in $dir; trying npm install instead."
         (cd "$dir" && npm install --legacy-peer-deps --no-audit) || { echo "npm could not install the packages in '$dir'. Check the internet connection, then run setup again."; exit 1; }
@@ -76,10 +90,12 @@ for dir in "$REPO_ROOT/admin-portal (7)" "$REPO_ROOT/coe-portal (7)" "$STUDENT_D
 done
 done_ "Packages installed."
 
-# 5. The portal students use, built for production (same-origin, no source maps).
-step "[5/7] Building the student portal..."
-(cd "$STUDENT_DIR" && npm run build) || { echo "The student portal build failed. Read the error above."; exit 1; }
-done_ "Student portal built."
+# 5. The three portals, built for production (same-origin, no source maps).
+step "[5/7] Building the student, admin and COE portals..."
+for portal in "student|$STUDENT_DIR" "admin|$REPO_ROOT/admin-portal (7)" "COE|$REPO_ROOT/coe-portal (7)"; do
+    (cd "${portal#*|}" && npm run build) || { echo "The ${portal%%|*} portal build failed. Read the error above."; exit 1; }
+done
+done_ "Portals built."
 
 # 6. Java services and their key pairs.
 step "[6/7] Compiling the Java services..."

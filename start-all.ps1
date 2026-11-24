@@ -152,15 +152,12 @@ Write-Host "`n==================================================================
 Write-Host "  ALL MIT MYSORE EXAMINATION SYSTEM SERVICES RUNNING!" -ForegroundColor Green
 Write-Host "====================================================================" -ForegroundColor Green
 Write-Host "  1. HOD / Faculty Portal:   http://${displayHost}:3000" -ForegroundColor White
-Write-Host "     Credentials:            hod.cse / CSE@2109  (or Admin@123)" -ForegroundColor Gray
-Write-Host "                             hod.ise / ISE@3325  (or Admin@123)" -ForegroundColor Gray
+Write-Host "     Staff sign-in:          no default passwords; see README section 5 (admin and COE: deploy\set-staff-password.ps1)" -ForegroundColor Gray
 Write-Host "  2. COE Portal:             http://${displayHost}:3001" -ForegroundColor White
-Write-Host "     Credentials:            coe / COE@5828      (or Admin@123)" -ForegroundColor Gray
 Write-Host "  3. Student Portal:         http://${displayHost}:3002" -ForegroundColor White
 Write-Host "     Credentials (CSE):      USN: 4MH27CS001     DOB: 2004-01-01" -ForegroundColor Gray
 Write-Host "     Credentials (ISE):      USN: 4MH24IS001     DOB: 2004-02-01" -ForegroundColor Gray
 Write-Host "  4. Principal Portal:       http://${displayHost}:3000/principal" -ForegroundColor White
-Write-Host "     Credentials:            principal / PRINCIPAL@7658 (or Admin@123)" -ForegroundColor Gray
 Write-Host "  5. Central Backend API:    http://${displayHost}:8081" -ForegroundColor White
 Write-Host "  6. Lab Server API:         http://${displayHost}:8082/health" -ForegroundColor White
 Write-Host "  7. Document Converter API: http://${displayHost}:5001/api/health" -ForegroundColor White

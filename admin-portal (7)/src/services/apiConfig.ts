@@ -14,7 +14,12 @@ if (
 }
 
 const envUrl = metaEnv.VITE_API_BASE_URL;
-let resolvedUrl = (envUrl && !envUrl.includes(':8080') ? envUrl : `http://${defaultHost}:8081/api/v1`).trim();
+// A production build is served by deploy/gateway, which forwards /api/v1 to central on the same origin. It never calls an
+// absolute address: from a remote browser that would be the visitor's own machine, or a port Tailscale Funnel does not expose.
+// The dev server on the host PC (not a production build) keeps calling central directly.
+let resolvedUrl = metaEnv.PROD
+  ? '/api/v1'
+  : (envUrl && !envUrl.includes(':8080') ? envUrl : `http://${defaultHost}:8081/api/v1`).trim();
 if (defaultHost !== '127.0.0.1' && defaultHost !== 'localhost') {
   resolvedUrl = resolvedUrl.replace(/127\.0\.0\.1|localhost/, defaultHost);
 }

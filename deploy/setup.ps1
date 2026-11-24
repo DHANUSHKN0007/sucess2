@@ -89,6 +89,19 @@ if ([string]::IsNullOrWhiteSpace($cfg['LAB_INSTRUCTOR_USERNAME']) -or [string]::
     Write-Done 'Instructor login is already in .env. To replace it, delete both LAB_INSTRUCTOR_* lines and run setup again.'
 }
 
+# The admin and COE portals are public, and these accounts have no built-in password: each hash goes into .env and the
+# password is shown once here because nothing stores it.
+$cfg = Read-DotEnv $envPath
+foreach ($staff in 'admin', 'coe') {
+    if ([string]::IsNullOrWhiteSpace($cfg["STAFF_PASSWORD_HASH_$($staff.ToUpper())"])) {
+        Write-Host "  Creating the $staff login. The password below is shown ONCE and stored nowhere: write it down now." -ForegroundColor Cyan
+        & (Join-Path $PSScriptRoot 'set-staff-password.ps1') -User $staff
+        Write-Done "The $staff login saved to .env."
+    } else {
+        Write-Done "The $staff login is already in .env. To change it: .\deploy\set-staff-password.ps1 -User $staff"
+    }
+}
+
 # 3. Folders the services write into.
 Write-Step '[3/7] Creating storage folders...'
 foreach ($d in 'CampusExam\build_dev', 'CampusExam\keys', 'CampusExam\lab_server_keys', 'CampusExam\lab_storage\packages',
@@ -101,20 +114,23 @@ Write-Done 'Folders ready.'
 # 4. Packages.
 Write-Step '[4/7] Installing packages (a few minutes the first time)...'
 $studentDir = Join-Path $RepoRoot 'student-portal (Final)\student-portal (Final)\student-portal'
-foreach ($app in 'admin-portal (7)', 'coe-portal (7)') { Invoke-NpmInstall (Join-Path $RepoRoot $app) }
+# backend\ supplies the pg driver that preflight uses to check the demo staff passwords.
+foreach ($app in 'admin-portal (7)', 'coe-portal (7)', 'backend') { Invoke-NpmInstall (Join-Path $RepoRoot $app) }
 Invoke-NpmInstall $studentDir
 Write-Done 'Packages installed.'
 
-# 5. The portal students use, built for production (same-origin, no source maps).
-Write-Step '[5/7] Building the student portal...'
-Push-Location -LiteralPath $studentDir
-try {
-    npm.cmd run build
-    if ($LASTEXITCODE -ne 0) { throw 'The student portal build failed. Read the error above.' }
-} finally {
-    Pop-Location
+# 5. The three portals, built for production (same-origin, no source maps).
+Write-Step '[5/7] Building the student, admin and COE portals...'
+foreach ($portal in @(@('student', $studentDir), @('admin', (Join-Path $RepoRoot 'admin-portal (7)')), @('COE', (Join-Path $RepoRoot 'coe-portal (7)')))) {
+    Push-Location -LiteralPath $portal[1]
+    try {
+        npm.cmd run build
+        if ($LASTEXITCODE -ne 0) { throw "The $($portal[0]) portal build failed. Read the error above." }
+    } finally {
+        Pop-Location
+    }
 }
-Write-Done 'Student portal built.'
+Write-Done 'Portals built.'
 
 # 6. Java services and their key pairs.
 Write-Step '[6/7] Compiling the Java services...'

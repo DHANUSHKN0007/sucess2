@@ -127,9 +127,9 @@ npm run build
 
 | Portal | Role | Username | Password | Login Endpoint |
 |---|---|---|---|---|
-| Admin Portal | PRINCIPAL | `principal` | `PRINCIPAL@7658` | `POST /api/v1/auth/login` |
-| Admin Portal | HOD (CSE) | `hod.cs` | `Hod@cs123` | `POST /api/v1/auth/login` |
-| COE Portal | COE | `coe` *(or `coe.mitm`)* | `COE@5828` | `POST /api/v1/auth/coe/login` |
+| Admin Portal | PRINCIPAL | `principal` | set with `deploy/set-staff-password` (README section 5) | `POST /api/v1/auth/login` |
+| Admin Portal | HOD (CSE) | `hod.cs` | set with `deploy/set-staff-password` (README section 5) | `POST /api/v1/auth/login` |
+| COE Portal | COE | `coe` *(or `coe.mitm`)* | set with `deploy/set-staff-password` (README section 5) | `POST /api/v1/auth/coe/login` |
 | Student Portal | STUDENT | `4MH21CS001` | DOB: `2003-01-15` | `POST /api/student/login` |
 
 ---

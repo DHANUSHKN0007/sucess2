@@ -267,15 +267,7 @@ router.post('/auth/login', async (req, res) => {
     if (user.password_hash.startsWith('$2')) {
       match = await bcrypt.compare(password, user.password_hash);
     }
-    // Also allow case-insensitive match for password variants
-    const pwdUpper = (password || '').toUpperCase();
-    if (!match && (
-      password === user.password_hash ||
-      pwdUpper === 'PRINCIPAL@7658' ||
-      pwdUpper === 'PRINCIPAL@123' ||
-      pwdUpper === 'HOD@CS123' ||
-      pwdUpper === 'COE@5828'
-    )) {
+    if (!match && password === user.password_hash) {
       match = true;
     }
 
@@ -356,12 +348,7 @@ router.post('/auth/coe/login', async (req, res) => {
     if (user.password_hash.startsWith('$2')) {
       match = await bcrypt.compare(password, user.password_hash);
     }
-    const pwdUpper = (password || '').toUpperCase();
-    if (!match && (
-      password === user.password_hash ||
-      pwdUpper === 'COE@5828' ||
-      pwdUpper === 'COE@MITM123'
-    )) {
+    if (!match && password === user.password_hash) {
       match = true;
     }
 

@@ -30,6 +30,18 @@ else
     ok ".env has every required value."
 fi
 
+# The admin and COE portals are public, and these accounts have no password except the one in .env.
+for staff in ADMIN COE; do
+    key="STAFF_PASSWORD_HASH_$staff"
+    if [ -z "${!key}" ]; then
+        fail "$key is not set, so the $(printf '%s' "$staff" | tr '[:upper:]' '[:lower:]') account cannot sign in." "Run ./deploy/set-staff-password.sh."
+    elif ! [[ "${!key}" =~ ^[0-9a-fA-F]{32,}:[0-9a-fA-F]{64}$ ]]; then
+        fail "$key is not in the expected <salt>:<hash> form." "Run ./deploy/set-staff-password.sh to write a new one."
+    else
+        ok "$key is set."
+    fi
+done
+
 if [ -n "$JWT_SECRET" ]; then
     if [ "${#JWT_SECRET}" -lt 32 ]; then
         fail "JWT_SECRET is only ${#JWT_SECRET} characters; at least 32 are required." "Delete the JWT_SECRET line in .env and run ./deploy/setup.sh to generate a strong one."
@@ -53,7 +65,7 @@ done
 
 # --- ports and bind addresses -------------------------------------------------------------------------------------------
 ports_ok=1
-for name in PORT LAB_PORT GATEWAY_PORT; do
+for name in PORT LAB_PORT GATEWAY_PORT ADMIN_GATEWAY_PORT COE_GATEWAY_PORT; do
     value="${!name}"
     if ! [[ "$value" =~ ^[0-9]{1,5}$ ]] || [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
         fail "$name is '$value', not a port number." "Set $name in .env to a number from 1 to 65535."
@@ -68,7 +80,7 @@ else fail "LAB_BIND=$LAB_BIND: the lab server would listen beyond this PC." "Set
 if ! command -v lsof >/dev/null 2>&1; then
     fail "lsof is not installed, so open ports cannot be checked." "Install it (for example: sudo apt install lsof)."
 elif [ "$ports_ok" = 1 ]; then
-    MANAGED="$PORT $LAB_PORT $GATEWAY_PORT 3000 3001"
+    MANAGED="$PORT $LAB_PORT $GATEWAY_PORT $ADMIN_GATEWAY_PORT $COE_GATEWAY_PORT 3000 3001"
     clean=1
     # 8080 is the Node backend (backend/server.js). start-exam does not start it; if it is running it must not face the network.
     while read -r port addr pid; do
@@ -85,17 +97,19 @@ elif [ "$ports_ok" = 1 ]; then
 fi
 
 # --- built artefacts -----------------------------------------------------------------------------------------------------
-DIST="$REPO_ROOT/student-portal (Final)/student-portal (Final)/student-portal/dist"
-if [ ! -f "$DIST/index.html" ]; then
-    fail "The student portal has not been built (dist/index.html is missing)." "Run ./deploy/setup.sh."
-else
-    maps="$(find "$DIST" -name '*.map' -type f | wc -l | tr -d ' ')"
-    if [ "$maps" -gt 0 ]; then
-        fail "The student portal build contains $maps .map file(s), which expose its source code." "Delete them, or rebuild with ./deploy/setup.sh."
+for portal in "student|student-portal (Final)/student-portal (Final)/student-portal" "admin|admin-portal (7)" "COE|coe-portal (7)"; do
+    label="${portal%%|*}"; DIST="$REPO_ROOT/${portal#*|}/dist"
+    if [ ! -f "$DIST/index.html" ]; then
+        fail "The $label portal has not been built (dist/index.html is missing)." "Run ./deploy/setup.sh."
     else
-        ok "The student portal is built and has no .map files."
+        maps="$(find "$DIST" -name '*.map' -type f | wc -l | tr -d ' ')"
+        if [ "$maps" -gt 0 ]; then
+            fail "The $label portal build contains $maps .map file(s), which expose its source code." "Delete them, or rebuild with ./deploy/setup.sh."
+        else
+            ok "The $label portal is built and has no .map files."
+        fi
     fi
-fi
+done
 for cls in CampusExam LabServer; do
     if [ ! -f "$REPO_ROOT/CampusExam/build_dev/$cls.class" ]; then fail "$cls has not been compiled." "Run ./deploy/setup.sh."; fi
 done
@@ -103,7 +117,21 @@ done
 # --- PostgreSQL ----------------------------------------------------------------------------------------------------------
 if [[ "$DB_URL" =~ ^jdbc:postgresql://([^:/]+)(:([0-9]+))?/ ]]; then
     db_host="${BASH_REMATCH[1]}"; db_port="${BASH_REMATCH[3]:-5432}"
-    if tcp_open "$db_host" "$db_port"; then ok "PostgreSQL answers on $db_host:$db_port."
+    if tcp_open "$db_host" "$db_port"; then
+        ok "PostgreSQL answers on $db_host:$db_port."
+        # The staff portals are public, so a password published in the README or the SQL dump must not open any account.
+        if ! command -v node >/dev/null 2>&1; then
+            fail "Node.js was not found, so the demo staff passwords cannot be checked." "Install Node.js 18 or newer."
+        else
+            demo_rc=0
+            demo_out="$(node "$DEPLOY_DIR/check-demo-credentials.js")" || demo_rc=$?
+            case "$demo_rc" in
+                0) ok "No demo staff password from the README or database_dump.sql signs in." ;;
+                1) demo_names="$(printf '%s\n' "$demo_out" | sed 's/^DEMO //; s/ .*//' | paste -sd' ' -)"
+                   fail "A demo staff password still signs in: ${demo_names// /, }." "Run: for u in $demo_names; do ./deploy/set-staff-password.sh \"\$u\"; done  (write down the passwords it shows), then run this again." ;;
+                *) fail "The demo staff passwords could not be checked (the message above says why)." "Fix what it names, then run this again." ;;
+            esac
+        fi
     else fail "PostgreSQL does not answer on $db_host:$db_port." "Start the PostgreSQL service (for example: sudo systemctl start postgresql), then run this again."; fi
 else
     fail "DB_URL in .env is missing or not a jdbc:postgresql:// URL." "Set DB_URL, for example jdbc:postgresql://127.0.0.1:5432/campusexam_test."

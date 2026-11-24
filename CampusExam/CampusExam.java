@@ -677,6 +677,98 @@ public final class CampusExam {
         }
     }
 
+    // --- STAFF SIGN-IN LIMITS: the same rule as the lab server's instructor login ---
+    private static final Map<String, ConcurrentLinkedDeque<Long>> STAFF_LOGIN_FAILURES_BY_SOURCE = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedDeque<Long> STAFF_LOGIN_FAILURES_GLOBAL = new ConcurrentLinkedDeque<>();
+    // A slowed sign-in holds a server thread for up to 30 s; at most this many at once, so guessing cannot starve the server.
+    private static final Semaphore STAFF_LOGIN_DELAY_SLOTS = new Semaphore(8);
+
+    static boolean isStaffLoginRoute(String path) {
+        return path.equals("login") || path.equals("auth/login") || path.equals("auth/coe/login")
+            || path.equals("v1/auth/login") || path.equals("v1/auth/coe/login");
+    }
+
+    // The client the five-failures-a-minute limit counts. Behind a gateway every request arrives from loopback, so this is the one
+    // address the gateway trusts and forwards in X-Gateway-Client (it sends nothing when it has none); without it the account name stands in.
+    static String staffLoginSource(HttpExchange exchange, String username) {
+        String client = exchange.getRequestHeaders().getFirst("X-Gateway-Client");
+        if (client != null && !client.isBlank()) return "ip:" + client.trim().substring(0, Math.min(64, client.trim().length()));
+        String name = username == null ? "" : username.trim().toLowerCase(Locale.ROOT);
+        return "user:" + name.substring(0, Math.min(64, name.length()));
+    }
+
+    static int recentLoginFailures(ConcurrentLinkedDeque<Long> failures, long now) {
+        Long oldest;
+        while ((oldest = failures.peekFirst()) != null && now - oldest >= 60000L) failures.pollFirst();
+        return failures.size();
+    }
+
+    static void staffLoginPrecheck(String source) throws InterruptedException {
+        long now = System.currentTimeMillis();
+        if (STAFF_LOGIN_FAILURES_BY_SOURCE.size() > 5000) {
+            STAFF_LOGIN_FAILURES_BY_SOURCE.values().removeIf(d -> recentLoginFailures(d, now) == 0);
+        }
+        ConcurrentLinkedDeque<Long> failures = STAFF_LOGIN_FAILURES_BY_SOURCE.get(source);
+        if (failures != null && recentLoginFailures(failures, now) >= 5) {
+            throw new Problem(429, "LOGIN_RATE_LIMITED", "Too many failed sign-in attempts. Try again in a minute.");
+        }
+        // Each recent failure anywhere slows every attempt by a second (at most 30): guessing gets slow, but nobody is ever locked out of every account.
+        long delayMs = Math.min(recentLoginFailures(STAFF_LOGIN_FAILURES_GLOBAL, now) * 1000L, 30000L);
+        if (delayMs > 0) {
+            if (!STAFF_LOGIN_DELAY_SLOTS.tryAcquire()) {
+                throw new Problem(429, "LOGIN_RATE_LIMITED", "Too many sign-in attempts at once. Try again in a minute.");
+            }
+            try { Thread.sleep(delayMs); } finally { STAFF_LOGIN_DELAY_SLOTS.release(); }
+        }
+    }
+
+    static void staffLoginFailed(String source) {
+        long at = System.currentTimeMillis();
+        STAFF_LOGIN_FAILURES_BY_SOURCE.computeIfAbsent(source, k -> new ConcurrentLinkedDeque<>()).addLast(at);
+        STAFF_LOGIN_FAILURES_GLOBAL.addLast(at);
+    }
+
+    // The signed-in staff member behind a request: a server-issued session token that is still unexpired, and (when roles are
+    // given) one of those roles. Only an SSE stream may carry the token in the query string, because EventSource cannot set headers.
+    static User staffUser(Connection db, HttpExchange exchange, Form form, boolean allowQueryToken, String... roles) throws Exception {
+        String header = exchange.getRequestHeaders().getFirst("Authorization");
+        String raw = null;
+        if (header != null && header.regionMatches(true, 0, "Bearer ", 0, 7)) raw = header.substring(7).trim();
+        else if (allowQueryToken) raw = form.get("token").trim();
+        check(raw != null && raw.matches("[a-fA-F0-9]{64}"), 401, "Sign in required");
+        User user = authenticate(db, digest(raw));
+        check(!"STUDENT".equalsIgnoreCase(user.role()), 403, "Students are prohibited from accessing administrative portal APIs");
+        if (roles.length > 0) user.require(roles);
+        return user;
+    }
+
+    // The lab server on this host has no staff token to present. Its two calls into central are accepted from a direct loopback
+    // connection only; a request that came through a gateway always carries X-Gateway-Origin and must hold a staff token instead.
+    static boolean isLocalSystemCall(HttpExchange exchange) {
+        return exchange.getRemoteAddress().getAddress().isLoopbackAddress()
+            && exchange.getRequestHeaders().getFirst("X-Gateway-Origin") == null;
+    }
+
+    // Routes that used to answer anyone. The student exam routes, security/violation, security/unlock and the instructor login are
+    // not here: they are the embedded student runtime, which no staff gateway forwards.
+    static final Set<String> STAFF_ONLY_OPEN_ROUTES = Set.of(
+        "labs/servers", "monitoring/sessions", "recovery/relogin-authorisations", "recovery/relogin-authorisations/approve",
+        "recovery/relogin-authorisations/consume", "student/emergency-relogin", "recovery/overview", "recovery/transfers",
+        "recovery/audit-logs", "recovery/config", "recovery/fresh-start", "security/audit-logs");
+
+    static void gateOpenRoutes(Connection db, HttpExchange exchange, Form form, String method, String route) throws Exception {
+        boolean get = method.equals("GET");
+        boolean post = method.equals("POST");
+        if (get && (route.equals("events") || route.equals("monitoring/events"))) {
+            staffUser(db, exchange, form, true);
+        } else if (post && (route.equals("events/broadcast") || route.equals("monitoring/events/broadcast") || route.equals("results/import-package"))) {
+            if (!isLocalSystemCall(exchange)) staffUser(db, exchange, form, false, "COE", "ADMIN");
+        } else if (STAFF_ONLY_OPEN_ROUTES.contains(route) || route.startsWith("monitoring/sessions/")
+                || (route.startsWith("labs/") && route.contains("/package-receipt"))) {
+            staffUser(db, exchange, form, false, "COE", "ADMIN");
+        }
+    }
+
     static void handle(HttpExchange exchange) throws IOException {
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
@@ -691,6 +783,7 @@ public final class CampusExam {
         String response = null;
         byte[] binaryResponse = null;
         boolean isV1 = false;
+        String loginSource = null;
         try {
             String fullPath = exchange.getRequestURI().getPath();
             String path = fullPath;
@@ -710,6 +803,12 @@ public final class CampusExam {
             String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
             Form form = parseBody(method, contentType, body, exchange.getRequestURI().getRawQuery());
 
+            // Before any database connection is taken, because a slowed attempt waits here for up to 30 s.
+            if (method.equals("POST") && isStaffLoginRoute(path)) {
+                loginSource = staffLoginSource(exchange, form.get("username"));
+                staffLoginPrecheck(loginSource);
+            }
+
             if ((path.equals("v1/health") || path.equals("health")) && method.equals("GET")) {
                 byte[] resBytes = (isV1 ? v1Success(Map.of("status", "ok"), "System operational") : "{\"status\":\"ok\"}").getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
@@ -722,6 +821,7 @@ public final class CampusExam {
             try (Connection db = connect()) {
                 db.setAutoCommit(false);
                 try {
+                    gateOpenRoutes(db, exchange, form, method, isV1 ? path.substring(3) : path);
                     if (isV1) {
                         String v1Path = path.substring(3);
                         while (v1Path.endsWith("/") && v1Path.length() > 1) v1Path = v1Path.substring(0, v1Path.length() - 1);
@@ -819,6 +919,7 @@ public final class CampusExam {
                 }
             }
         } catch (Problem failure) {
+            if (loginSource != null && failure.status == 401) staffLoginFailed(loginSource);
             status = failure.status;
             String errCode = (failure.code != null && !failure.code.isBlank())
                     ? failure.code
@@ -1029,22 +1130,36 @@ public final class CampusExam {
         } catch (Exception ignored) {}
     }
 
-    static final Map<String, String> OFFICIAL_CREDENTIALS = Map.ofEntries(
-        Map.entry("admin", "ADMIN@7157"),
-        Map.entry("principal", "PRINCIPAL@7658"),
-        Map.entry("coe", "COE@5828"),
-        Map.entry("hod.civil", "CIVIL@0134"),
-        Map.entry("hod.cse", "CSE@2109"),
-        Map.entry("hod.cse.ai", "CSEAI@4939"),
-        Map.entry("hod.cse.ds", "CSEDS@4636"),
-        Map.entry("hod.cse.bs", "CSEBS@1588"),
-        Map.entry("hod.cse.aiml", "AIML@1504"),
-        Map.entry("hod.cse.iotcs", "IOTCS@7534"),
-        Map.entry("hod.comp", "COMPENG@5354"),
-        Map.entry("hod.ece", "ECE@5175"),
-        Map.entry("hod.ise", "ISE@3325"),
-        Map.entry("hod.mech", "MECH@9626")
-    );
+    // No staff password is built into the code. A staff account's password comes from STAFF_PASSWORD_HASH_<USERNAME>
+    // ("<saltHex>:<hashHex>", PBKDF2-HMAC-SHA256, written to .env by deploy/set-staff-password), with the username upper-cased
+    // and every character that is not A-Z or 0-9 turned into "_": admin -> STAFF_PASSWORD_HASH_ADMIN, hod.cse -> STAFF_PASSWORD_HASH_HOD_CSE.
+    static String staffHashKey(String username) {
+        return "STAFF_PASSWORD_HASH_" + username.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "_");
+    }
+
+    static boolean validStaffHash(String value) {
+        String[] parts = value.trim().split(":");
+        if (parts.length != 2) return false;
+        try {
+            return HexFormat.of().parseHex(parts[0]).length >= 16 && HexFormat.of().parseHex(parts[1]).length == 32;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    // A hash no password can produce, for an account that has no configured password.
+    static String unusablePasswordHash() {
+        byte[] salt = new byte[16];
+        byte[] hash = new byte[32];
+        RANDOM.nextBytes(salt);
+        RANDOM.nextBytes(hash);
+        return HexFormat.of().formatHex(salt) + ":" + HexFormat.of().formatHex(hash);
+    }
+
+    // admin and coe have no password except the one in .env; the others only once one is set there.
+    static boolean staffPasswordManagedByEnv(String username) {
+        return Set.of("admin", "coe").contains(username.toLowerCase(Locale.ROOT)) || !env(staffHashKey(username), "").isBlank();
+    }
 
     static void bootstrapOfficialAccounts(Connection db) throws Exception {
         String[][] depts = {
@@ -1074,42 +1189,58 @@ public final class CampusExam {
         }
 
         String[][] accounts = {
-            {"admin", "ADMIN@7157", "ADMIN", null, "System Administrator", "Central Administrator"},
-            {"principal", "PRINCIPAL@7658", "PRINCIPAL", null, "Principal", "Principal & Chief Academic Officer"},
-            {"coe", "COE@5828", "COE", null, "Controller of Examinations", "Controller of Examinations"},
-            {"hod.civil", "CIVIL@0134", "HOD", "E158CV", "HOD Civil Engineering", "Head of Department"},
-            {"hod.cse", "CSE@2109", "HOD", "E158CS", "HOD Computer Science & Engineering", "Head of Department"},
-            {"hod.cse.ai", "CSEAI@4939", "HOD", "E158CA", "HOD CSE - Artificial Intelligence", "Head of Department"},
-            {"hod.cse.ds", "CSEDS@4636", "HOD", "E158CD", "HOD CSE - Data Science", "Head of Department"},
-            {"hod.cse.bs", "CSEBS@1588", "HOD", "E158CB", "HOD CSE - Business Systems", "Head of Department"},
-            {"hod.cse.aiml", "AIML@1504", "HOD", "E158CI", "HOD CSE - AI & ML", "Head of Department"},
-            {"hod.cse.iotcs", "IOTCS@7534", "HOD", "E158IC", "HOD CSE - IoT & Cyber Security", "Head of Department"},
-            {"hod.comp", "COMPENG@5354", "HOD", "E158CE", "HOD Computer Engineering", "Head of Department"},
-            {"hod.ece", "ECE@5175", "HOD", "E158EC", "HOD Electronics & Communication Engineering", "Head of Department"},
-            {"hod.ise", "ISE@3325", "HOD", "E158IS", "HOD Information Science & Engineering", "Head of Department"},
-            {"hod.mech", "MECH@9626", "HOD", "E158ME", "HOD Mechanical Engineering", "Head of Department"}
+            {"admin", "ADMIN", null, "System Administrator", "Central Administrator"},
+            {"principal", "PRINCIPAL", null, "Principal", "Principal & Chief Academic Officer"},
+            {"coe", "COE", null, "Controller of Examinations", "Controller of Examinations"},
+            {"hod.civil", "HOD", "E158CV", "HOD Civil Engineering", "Head of Department"},
+            {"hod.cse", "HOD", "E158CS", "HOD Computer Science & Engineering", "Head of Department"},
+            {"hod.cse.ai", "HOD", "E158CA", "HOD CSE - Artificial Intelligence", "Head of Department"},
+            {"hod.cse.ds", "HOD", "E158CD", "HOD CSE - Data Science", "Head of Department"},
+            {"hod.cse.bs", "HOD", "E158CB", "HOD CSE - Business Systems", "Head of Department"},
+            {"hod.cse.aiml", "HOD", "E158CI", "HOD CSE - AI & ML", "Head of Department"},
+            {"hod.cse.iotcs", "HOD", "E158IC", "HOD CSE - IoT & Cyber Security", "Head of Department"},
+            {"hod.comp", "HOD", "E158CE", "HOD Computer Engineering", "Head of Department"},
+            {"hod.ece", "HOD", "E158EC", "HOD Electronics & Communication Engineering", "Head of Department"},
+            {"hod.ise", "HOD", "E158IS", "HOD Information Science & Engineering", "Head of Department"},
+            {"hod.mech", "HOD", "E158ME", "HOD Mechanical Engineering", "Head of Department"}
         };
 
         for (String[] acc : accounts) {
             String uName = acc[0];
-            String rawPass = acc[1];
-            String role = acc[2];
-            String deptCode = acc[3];
-            String fullName = acc[4];
-            String designation = acc[5];
+            String role = acc[1];
+            String deptCode = acc[2];
+            String fullName = acc[3];
+            String designation = acc[4];
             Long dId = null;
             if (deptCode != null) {
                 String dIdStr = one(db, "SELECT id FROM department WHERE code = ? OR code = ? ORDER BY id ASC LIMIT 1", deptCode, deptCode.replace("E158", ""));
                 if (!dIdStr.isEmpty()) dId = Long.parseLong(dIdStr);
             }
-            String pHash = passwordHash(rawPass);
+            String configured = env(staffHashKey(uName), "").trim();
+            String pHash = null;
+            if (validStaffHash(configured)) {
+                pHash = configured;
+            } else if (!configured.isEmpty()) {
+                System.out.println("[Startup] " + staffHashKey(uName) + " is not '<saltHex>:<hashHex>' and was ignored.");
+            }
+            boolean envOnly = role.equals("ADMIN") || role.equals("COE");
+            if (pHash == null && envOnly) {
+                System.out.println("[Startup] " + staffHashKey(uName) + " is not set: the " + uName + " account cannot sign in. Run deploy/set-staff-password.");
+            }
             String existingId = one(db, "SELECT id FROM account WHERE lower(username)=lower(?)", uName);
             if (existingId.isEmpty()) {
                 run(db, "INSERT INTO account(username, password_hash, role, department_id, full_name, email, employee_id, designation, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')",
-                    uName, pHash, role, dId, fullName, uName + "@mitmysore.in", "EMP-" + uName.toUpperCase(Locale.ROOT), designation);
+                    uName, pHash != null ? pHash : unusablePasswordHash(), role, dId, fullName, uName + "@mitmysore.in", "EMP-" + uName.toUpperCase(Locale.ROOT), designation);
             } else {
-                run(db, "UPDATE account SET password_hash = ?, role = ?, department_id = COALESCE(department_id, ?), full_name = ?, designation = ?, status = 'ACTIVE' WHERE id = ?",
-                    pHash, role, dId, fullName, designation, Long.parseLong(existingId));
+                // The status is left alone: an account an administrator disabled must stay disabled across a restart.
+                run(db, "UPDATE account SET role = ?, department_id = COALESCE(department_id, ?), full_name = ?, designation = ? WHERE id = ?",
+                    role, dId, fullName, designation, Long.parseLong(existingId));
+                if (pHash != null) {
+                    run(db, "UPDATE account SET password_hash = ? WHERE id = ?", pHash, Long.parseLong(existingId));
+                } else if (envOnly) {
+                    // Whatever hash the database already holds (a demo password from a dump, say) must not keep working.
+                    run(db, "UPDATE account SET password_hash = ? WHERE id = ?", unusablePasswordHash(), Long.parseLong(existingId));
+                }
             }
         }
     }
@@ -3124,6 +3255,9 @@ public final class CampusExam {
         String newPassword = form.need("newPassword");
         check(!currentPassword.equals(newPassword), 400, "New password must be different from current password");
         validatePassword(newPassword);
+        // A password that comes from .env would be put back at the next start, so changing it here would only look like it worked.
+        check(!staffPasswordManagedByEnv(user.username()), 409,
+            "This account's password is set by the administrator with deploy/set-staff-password and cannot be changed here.");
 
         try (var st = sql(db, "SELECT password_hash FROM account WHERE id = ?", user.id());
              var rs = st.executeQuery()) {
@@ -11710,6 +11844,13 @@ public final class CampusExam {
             }
         }
         if (path.startsWith("coe/")) {
+            user.require("COE", "ADMIN");
+        }
+        // The COE portal's own screens: examinations, results, laboratories and monitoring. Principal and HOD users reach their
+        // equivalents under principal/ and hod/ above, so none of them has a reason to be here.
+        if (path.startsWith("examinations/") || path.startsWith("results/") || path.startsWith("labs/") || path.startsWith("monitoring/")
+                || path.startsWith("institution/laboratories") || path.equals("laboratories") || path.startsWith("laboratories/")
+                || path.equals("approve-results") || path.equals("release-results") || path.equals("import-results")) {
             user.require("COE", "ADMIN");
         }
 

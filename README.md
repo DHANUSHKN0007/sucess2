@@ -4,8 +4,12 @@
 A comprehensive, offline-first examination management platform designed for autonomous engineering institutions. Built with zero cloud runtime dependencies, air-gapped cryptographic validation, multi-department shared laboratory delivery, and synchronized offline lab servers.
 
 > **Running a real exam?** Follow [DEPLOYMENT.md](DEPLOYMENT.md) (`deploy\setup.ps1`, `deploy\start-exam.ps1`). It keeps every
-> service on 127.0.0.1 and publishes only the gateway through Tailscale. The Quickstart below is for
-> local development, and `-Mode LAN` (section 8) opens the services to the whole network; neither is for a real sitting.
+> service on 127.0.0.1 and publishes only three gateways (student, admin, COE) through Tailscale Funnel. The Quickstart
+> below is for local development, and `-Mode LAN` (section 8) opens the services to the whole network; neither is for a
+> real sitting.
+>
+> **Funnel URLs are public.** Every Tailscale Funnel URL appears in public Certificate Transparency logs, so anyone can
+> discover it. It is not secret: the logins, rate limits and route allowlists are the protection.
 
 ---
 
@@ -119,18 +123,30 @@ chmod +x setup.sh start-all.sh stop-all.sh status.sh
 
 ---
 
-## 5. Portal Access URLs & Default Credentials
+## 5. Portal Access URLs & Credentials
 
-| Portal | URL | Role | Default Username | Default Password |
-| :--- | :--- | :--- | :--- | :--- |
-| **HOD (CSE)** | `http://localhost:3000` | HOD | `hod.cse` | `CSE@2109` *(or `Admin@123`)* |
-| **HOD (ISE)** | `http://localhost:3000` | HOD | `hod.ise` | `ISE@3325` *(or `Admin@123`)* |
-| **Principal** | `http://localhost:3000/principal` | PRINCIPAL | `principal` | `PRINCIPAL@7658` *(or `Admin@123`)* |
-| **Admin** | `http://localhost:3000` | ADMIN | `admin` | `Admin@123` |
-| **COE** | `http://localhost:3001` | COE | `coe` | `COE@5828` *(or `Admin@123`)* |
-| **Student (CSE)** | `http://localhost:3002` | STUDENT | USN: `4MH27CS001` | DOB: `2004-01-01` |
-| **Student (ISE)** | `http://localhost:3002` | STUDENT | USN: `4MH24IS001` | DOB: `2004-02-01` |
-| **Doc Converter API** | `http://localhost:5001` | SERVICE | - | - |
+| Portal | URL on the host PC | Public URL (Tailscale Funnel) | Gateway port on the host PC |
+| :--- | :--- | :--- | :--- |
+| **Student** | `http://localhost:3002` | `https://<name>/` (port 443) | `GATEWAY_PORT`, 3002 |
+| **Admin / HOD / Principal** | `http://localhost:3000` | `https://<name>:8443/` | `ADMIN_GATEWAY_PORT`, 3003 |
+| **COE** | `http://localhost:3001` | `https://<name>:10000/` | `COE_GATEWAY_PORT`, 3004 |
+| **Doc Converter API** | `http://localhost:5001` | not published | - |
+
+Funnel only allows ports 443, 8443 and 10000. `deploy\start-exam.ps1` prints the three `tailscale funnel` commands and
+never runs them; `deploy\stop-exam.ps1` leaves Funnel as it is. The public admin and COE URLs do not carry the document
+converter or the COE lab-server screens; use `http://localhost:3000` and `http://localhost:3001` on the host PC for those
+(details in [DEPLOYMENT.md](DEPLOYMENT.md), "Public staff portals").
+
+**There are no default staff passwords.**
+
+- **Admin and COE** have no password until you create one. Run `.\deploy\set-staff-password.ps1` (`./deploy/set-staff-password.sh`
+  on Linux/macOS; `setup` runs it for you). It writes a PBKDF2 hash to `.env` as `STAFF_PASSWORD_HASH_ADMIN` and
+  `STAFF_PASSWORD_HASH_COE` and prints a generated password once. Restart the services afterwards. This applies to the
+  `start-all` scripts as well: without the hash, those accounts cannot sign in.
+- **Principal and HOD** accounts come from the database seed with demo passwords. `deploy\preflight.ps1` refuses to pass
+  until each has a new one: `.\deploy\set-staff-password.ps1 -User principal,hod.cse,...` (it prints the exact command).
+- **Students** sign in with USN and date of birth, and only if they are on an activated exam package's roster. The seed
+  contains `4MH27CS001` (DOB `2004-01-01`) and `4MH24IS001` (DOB `2004-02-01`) for development.
 
 *Note: In LAN mode, replace `localhost` with the host computer's LAN IP address (e.g. `http://192.168.1.50:3000`). The frontends automatically resolve backend API addresses relative to the current browser hostname.*
 
@@ -260,6 +276,7 @@ To run the examination system across physical workstations in a computer laborat
 | `FATAL: password authentication failed for user "campusexam"` | PostgreSQL user credentials mismatch | Check `DB_USER` and `DB_PASSWORD` in `.env`. By default: `campusexam / password`. |
 | `Database campusexam_test does not exist` | Database not initialized | Run `.\setup.ps1 -InitDatabase` or execute `psql -c "CREATE DATABASE campusexam_test;"`. |
 | `Cannot find lab_public.key` | Keypair not yet initialized | Run `java -cp build_dev CampusExam --init-keys`. |
+| `Cannot sign in as admin or coe` | No `STAFF_PASSWORD_HASH_ADMIN` / `_COE` in `.env`, or the services were not restarted after setting it | Run `.\deploy\set-staff-password.ps1`, then restart. |
 | `CORS error on client laptop in LAN mode` | Host bound to 127.0.0.1 instead of 0.0.0.0 | Start services with `.\start-all.ps1 -Mode LAN`. Ensure Windows Firewall allows ports 3000-3002, 8081-8082. |
 | `Student sees "Authentication session expired"` | Student USN/DOB not in roster or sitting inactive | Check that the sitting is exported and candidate USN is listed in `CampusExam/seed_demo_data.sql`. |
 

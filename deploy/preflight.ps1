@@ -31,6 +31,18 @@ if ($missing.Count -gt 0) {
     Write-Ok '.env has every required value.'
 }
 
+# The admin and COE portals are public, and these accounts have no password except the one in .env.
+foreach ($staff in 'ADMIN', 'COE') {
+    $key = "STAFF_PASSWORD_HASH_$staff"
+    if (-not $cfg.Contains($key) -or [string]::IsNullOrWhiteSpace($cfg[$key])) {
+        Write-Problem "$key is not set, so the $($staff.ToLower()) account cannot sign in." 'Run .\deploy\set-staff-password.ps1.'
+    } elseif ($cfg[$key] -notmatch '^[0-9a-fA-F]{32,}:[0-9a-fA-F]{64}$') {
+        Write-Problem "$key is not in the expected <salt>:<hash> form." 'Run .\deploy\set-staff-password.ps1 to write a new one.'
+    } else {
+        Write-Ok "$key is set."
+    }
+}
+
 if ($cfg.Contains('JWT_SECRET') -and $cfg['JWT_SECRET'].Length -gt 0) {
     if ($cfg['JWT_SECRET'].Length -lt 32) {
         Write-Problem "JWT_SECRET is only $($cfg['JWT_SECRET'].Length) characters; at least 32 are required." 'Delete the JWT_SECRET line in .env and run .\deploy\setup.ps1 to generate a strong one.'
@@ -56,7 +68,7 @@ foreach ($flag in 'LAB_TEST_MODE', 'LAB_STAFF_ALLOW_REMOTE', 'ALLOW_SAMPLE_EXAM'
 
 # --- ports and bind addresses -----------------------------------------------------------------------------------------
 $portsOk = $true
-foreach ($name in 'PORT', 'LAB_PORT', 'GATEWAY_PORT') {
+foreach ($name in 'PORT', 'LAB_PORT', 'GATEWAY_PORT', 'ADMIN_GATEWAY_PORT', 'COE_GATEWAY_PORT') {
     if ($cfg[$name] -notmatch '^\d{1,5}$' -or [int]$cfg[$name] -lt 1 -or [int]$cfg[$name] -gt 65535) {
         Write-Problem "$name is '$($cfg[$name])', not a port number." "Set $name in .env to a number from 1 to 65535."
         $portsOk = $false
@@ -91,15 +103,17 @@ if ($portsOk) {
 }
 
 # --- built artefacts ---------------------------------------------------------------------------------------------------
-$dist = Join-Path $RepoRoot 'student-portal (Final)\student-portal (Final)\student-portal\dist'
-if (-not (Test-Path -LiteralPath (Join-Path $dist 'index.html'))) {
-    Write-Problem 'The student portal has not been built (dist\index.html is missing).' 'Run .\deploy\setup.ps1.'
-} else {
-    $maps = @(Get-ChildItem -LiteralPath $dist -Recurse -Filter '*.map' -File)
-    if ($maps.Count -gt 0) {
-        Write-Problem "The student portal build contains $($maps.Count) .map file(s), which expose its source code." 'Delete them, or rebuild with .\deploy\setup.ps1.'
+foreach ($portal in @(@('student', 'student-portal (Final)\student-portal (Final)\student-portal'), @('admin', 'admin-portal (7)'), @('COE', 'coe-portal (7)'))) {
+    $dist = Join-Path $RepoRoot "$($portal[1])\dist"
+    if (-not (Test-Path -LiteralPath (Join-Path $dist 'index.html'))) {
+        Write-Problem "The $($portal[0]) portal has not been built (dist\index.html is missing)." 'Run .\deploy\setup.ps1.'
     } else {
-        Write-Ok 'The student portal is built and has no .map files.'
+        $maps = @(Get-ChildItem -LiteralPath $dist -Recurse -Filter '*.map' -File)
+        if ($maps.Count -gt 0) {
+            Write-Problem "The $($portal[0]) portal build contains $($maps.Count) .map file(s), which expose its source code." 'Delete them, or rebuild with .\deploy\setup.ps1.'
+        } else {
+            Write-Ok "The $($portal[0]) portal is built and has no .map files."
+        }
     }
 }
 
@@ -122,6 +136,22 @@ if (-not $dbHost) {
     Write-Problem 'DB_URL in .env is missing or not a jdbc:postgresql:// URL.' 'Set DB_URL, e.g. jdbc:postgresql://127.0.0.1:5432/campusexam_test.'
 } elseif (Test-TcpPort $dbHost $dbPort) {
     Write-Ok "PostgreSQL answers on ${dbHost}:$dbPort."
+    # The staff portals are public, so a password published in the README or the SQL dump must not open any account.
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCmd) {
+        Write-Problem 'Node.js was not found, so the demo staff passwords cannot be checked.' 'Install Node.js 18 or newer.'
+    } else {
+        $global:LASTEXITCODE = 0
+        $demoOut = @(& $nodeCmd.Source (Join-Path $PSScriptRoot 'check-demo-credentials.js'))
+        if ($LASTEXITCODE -eq 0) {
+            Write-Ok 'No demo staff password from the README or database_dump.sql signs in.'
+        } elseif ($LASTEXITCODE -eq 1) {
+            $names = @($demoOut | ForEach-Object { (($_ -replace '^DEMO ', '') -split ' ')[0] })
+            Write-Problem "A demo staff password still signs in: $($names -join ', ')." "Run .\deploy\set-staff-password.ps1 -User $($names -join ','), write down the passwords it shows, then run this again."
+        } else {
+            Write-Problem 'The demo staff passwords could not be checked (the message above says why).' 'Fix what it names, then run this again.'
+        }
+    }
 } else {
     Write-Problem "PostgreSQL does not answer on ${dbHost}:$dbPort." 'Start the PostgreSQL service (Services > postgresql-x64-NN > Start), then run this again.'
 }

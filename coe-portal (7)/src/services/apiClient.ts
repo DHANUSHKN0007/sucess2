@@ -45,6 +45,12 @@ export function getApiConfig(): ApiClientConfig {
     (typeof import.meta !== 'undefined' && import.meta.env) ||
     ({} as Record<string, string | undefined>);
 
+  // A production build is served by deploy/gateway, which forwards /api/v1 to central on the same origin. It never calls an
+  // absolute address: from a remote browser that would be the visitor's own machine, or a port Tailscale Funnel does not expose.
+  // /lab-api is not forwarded (the lab server answers staff routes only to the host PC), so the lab calls get a 404.
+  // The dev server on the host PC (not a production build) keeps calling central and the lab server directly.
+  if (metaEnv.PROD) return { centralApiBaseUrl: '/api/v1', labApiBaseUrl: '/lab-api' };
+
   let winCentral: string | undefined;
   let winLab: string | undefined;
   if (typeof window !== 'undefined') {
@@ -157,7 +163,7 @@ async function executeJsonFetch<T>(
     });
   } catch {
     throw new ApiError(
-      `Unable to reach ${serviceLabel}. Verify network connectivity and ensure the backend service is running on http://localhost:8080.`,
+      `Unable to reach ${serviceLabel}. Check your network connection; if it is fine, the exam services are not running or this feature is available only on the host PC.`,
       { kind: 'network' }
     );
   }

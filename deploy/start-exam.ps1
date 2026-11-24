@@ -1,5 +1,5 @@
-# Starts every exam service bound to 127.0.0.1 and PRINTS the Tailscale command that publishes the gateway.
-# It never runs that command: you run it yourself when you are ready to let students in.
+# Starts every exam service bound to 127.0.0.1 and PRINTS the three Tailscale commands that publish the student, admin and COE gateways.
+# It never runs them: you run them yourself when you are ready to let people in.
 #   .\deploy\start-exam.ps1
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\env.ps1"
@@ -10,11 +10,16 @@ if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot '.env'))) {
 }
 $cfg = Get-ExamEnv
 
-# Without these two there is no instructor login, so a crashed student PC could not be recovered.
-foreach ($k in 'LAB_INSTRUCTOR_USERNAME', 'LAB_INSTRUCTOR_PASSWORD_HASH') {
+# Without the first two there is no instructor login, so a crashed student PC could not be recovered. Without the last two
+# the admin and COE accounts have no password at all.
+foreach ($k in 'LAB_INSTRUCTOR_USERNAME', 'LAB_INSTRUCTOR_PASSWORD_HASH', 'STAFF_PASSWORD_HASH_ADMIN', 'STAFF_PASSWORD_HASH_COE') {
     if (-not $cfg.Contains($k) -or [string]::IsNullOrWhiteSpace($cfg[$k])) {
         Write-Host "Not starting: $k is missing from .env." -ForegroundColor Red
-        Write-Host '  Fix: run .\deploy\setup.ps1; it creates the instructor login and shows its password once.' -ForegroundColor Yellow
+        if ($k -like 'STAFF_PASSWORD_HASH_*') {
+            Write-Host '  Fix: run .\deploy\set-staff-password.ps1; it sets the admin and COE passwords and shows them once.' -ForegroundColor Yellow
+        } else {
+            Write-Host '  Fix: run .\deploy\setup.ps1; it creates the instructor login and shows its password once.' -ForegroundColor Yellow
+        }
         exit 1
     }
 }
@@ -70,11 +75,17 @@ $node = (Get-Command node | Select-Object -First 1).Source
 $npm = (Get-Command npm.cmd | Select-Object -First 1).Source
 $centralPort = [int]$cfg['PORT']
 $gatewayPort = [int]$cfg['GATEWAY_PORT']
+$adminGatewayPort = [int]$cfg['ADMIN_GATEWAY_PORT']
+$coeGatewayPort = [int]$cfg['COE_GATEWAY_PORT']
 
 Write-Host "`nStarting services (all on 127.0.0.1)..." -ForegroundColor Cyan
 Start-ExamService 'central' $java @('-cp', 'build_dev;lib/postgresql.jar', 'CampusExam') $campusDir @{ PORT = $cfg['PORT']; BIND = $cfg['BIND'] }
 Start-ExamService 'lab-server' $java @('-cp', 'build_dev', 'LabServer') $campusDir @{ PORT = $cfg['LAB_PORT']; BIND = $cfg['LAB_BIND'] }
-Start-ExamService 'gateway' $node @('"' + (Join-Path $RepoRoot 'deploy\gateway\server.js') + '"') $RepoRoot @{}
+# One gateway per portal. Each is given every value it reads, because the overrides above leak into the services started after them.
+$gatewayJs = '"' + (Join-Path $RepoRoot 'deploy\gateway\server.js') + '"'
+Start-ExamService 'gateway' $node @($gatewayJs) $RepoRoot @{ GATEWAY_PROFILE = 'student'; GATEWAY_PORT = $cfg['GATEWAY_PORT']; LAB_PORT = $cfg['LAB_PORT'] }
+Start-ExamService 'gateway-admin' $node @($gatewayJs) $RepoRoot @{ GATEWAY_PROFILE = 'admin'; GATEWAY_PORT = $cfg['ADMIN_GATEWAY_PORT']; CENTRAL_PORT = $cfg['PORT'] }
+Start-ExamService 'gateway-coe' $node @($gatewayJs) $RepoRoot @{ GATEWAY_PROFILE = 'coe'; GATEWAY_PORT = $cfg['COE_GATEWAY_PORT']; CENTRAL_PORT = $cfg['PORT'] }
 Start-ExamService 'coe-portal' $npm @('run', 'dev', '--', '--port', '3001', '--host', '127.0.0.1') (Join-Path $RepoRoot 'coe-portal (7)') @{ PORT = '3001' }
 Start-ExamService 'admin-portal' $npm @('run', 'dev', '--', '--port', '3000', '--host', '127.0.0.1') (Join-Path $RepoRoot 'admin-portal (7)') @{ PORT = '3000' }
 $started | ConvertTo-Json | Set-Content -LiteralPath $pidFile -Encoding UTF8
@@ -87,6 +98,13 @@ if (-not (Wait-Until { (Invoke-WebRequest -Uri "http://127.0.0.1:$gatewayPort/ap
     Stop-WithMessage "http://127.0.0.1:$gatewayPort/api/health did not answer within 90 seconds, so the gateway or the lab server is not working."
 }
 Write-Host '  [ OK ] The gateway reaches the lab server (/api/health).' -ForegroundColor Green
+foreach ($g in @(@('admin', $adminGatewayPort), @('COE', $coeGatewayPort))) {
+    $gp = $g[1]
+    if (-not (Wait-Until { (Invoke-WebRequest -Uri "http://127.0.0.1:$gp/api/v1/health" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200 } 60)) {
+        Stop-WithMessage "http://127.0.0.1:$gp/api/v1/health did not answer within 60 seconds, so the $($g[0]) gateway or the central backend is not working."
+    }
+    Write-Host "  [ OK ] The $($g[0]) gateway reaches the central backend (/api/v1/health)." -ForegroundColor Green
+}
 if (-not (Wait-Until { Test-TcpPort '127.0.0.1' 3001 } 120)) {
     Write-Host '  [WARN] The COE portal is not up yet (the first start compiles it). Exam delivery is unaffected; see coe-portal.err.log.' -ForegroundColor DarkYellow
 }
@@ -101,16 +119,23 @@ Write-Host '  [ OK ] Every service listens on 127.0.0.1 only.' -ForegroundColor 
 $st = Get-TailscaleStatus
 $publicName = '<this PC''s Tailscale name>'
 if ($st -and $st.Self -and $st.Self.DNSName) { $publicName = $st.Self.DNSName.TrimEnd('.') }
-$funnelCmd = "tailscale funnel --bg $gatewayPort"
-if (-not (Get-Command tailscale -ErrorAction SilentlyContinue)) { $funnelCmd = "& `"$(Get-TailscaleExe)`" funnel --bg $gatewayPort" }
+$ts = 'tailscale'
+if (-not (Get-Command tailscale -ErrorAction SilentlyContinue)) { $ts = "& `"$(Get-TailscaleExe)`"" }
 
 Write-Host "`n====================================================================" -ForegroundColor Green
 Write-Host '  EXAM SERVICES ARE RUNNING (reachable from this PC only)' -ForegroundColor Green
 Write-Host '====================================================================' -ForegroundColor Green
-Write-Host '  Students cannot get in yet. When you are ready, run this ONE command yourself:'
-Write-Host "`n      $funnelCmd`n" -ForegroundColor Yellow
-Write-Host "  Students then open:   https://$publicName/"
-Write-Host '  Staff, on this PC:    COE portal  http://127.0.0.1:3001     Admin portal  http://127.0.0.1:3000'
-Write-Host '  That address is public. Access control is the student login, never the secrecy of the URL.'
-Write-Host '  When the sitting ends:  .\deploy\stop-exam.ps1' -ForegroundColor Cyan
+Write-Host '  Nothing is public yet. These commands are never run for you. When you are ready, run all three yourself.'
+Write-Host '  Funnel keeps them across restarts, so on a permanent host this is needed once, not per exam:'
+Write-Host "`n      $ts funnel --bg $gatewayPort"
+Write-Host "      $ts funnel --bg --https=8443 $adminGatewayPort"
+Write-Host "      $ts funnel --bg --https=10000 $coeGatewayPort`n" -ForegroundColor Yellow
+Write-Host "  Students open:   https://$publicName/"
+Write-Host "  Admin portal:    https://${publicName}:8443/"
+Write-Host "  COE portal:      https://${publicName}:10000/"
+Write-Host '  Staff, on this PC, with every feature (document converter, lab-server screens):'
+Write-Host '                   COE portal  http://127.0.0.1:3001     Admin portal  http://127.0.0.1:3000'
+Write-Host '  Those addresses are public and appear in certificate transparency logs: discoverable, not secret.'
+Write-Host '  Access control is the logins, never the secrecy of the URL.'
+Write-Host '  When the sitting ends:  .\deploy\stop-exam.ps1   (it leaves Funnel as it is)' -ForegroundColor Cyan
 Write-Host '====================================================================' -ForegroundColor Green

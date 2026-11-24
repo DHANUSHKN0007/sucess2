@@ -1,18 +1,11 @@
-# Ends the sitting: turns Funnel off, stops every exam service and confirms nothing is still listening.
+# Ends the sitting: stops every exam service and confirms nothing is still listening.
+# It does NOT touch Tailscale Funnel. The funnels are meant to stay configured across restarts on a permanent host; while the
+# services are down they simply answer with an error.
 #   .\deploy\stop-exam.ps1
 $ErrorActionPreference = 'Continue'
 . "$PSScriptRoot\env.ps1"
 $cfg = Get-ExamEnv
 $ports = Get-ExamPorts $cfg
-
-# Funnel first, so nothing public points at a service that is going away.
-Write-Host 'Turning Funnel off...' -ForegroundColor Yellow
-$ts = Get-TailscaleExe
-if ($ts) {
-    & $ts funnel reset
-} else {
-    Write-Host '  Tailscale was not found. If you turned Funnel on, turn it off by hand: tailscale funnel reset' -ForegroundColor DarkYellow
-}
 
 Write-Host 'Stopping exam services...' -ForegroundColor Yellow
 $pidFile = Join-Path $RepoRoot 'CampusExam\lab_storage\exam_pids.json'
@@ -38,7 +31,7 @@ if ($left.Count -gt 0) {
     Write-Host '  Fix: end that process in Task Manager, then run this again.' -ForegroundColor Yellow
     exit 1
 }
-Write-Host '[ OK ] Funnel is off and nothing is listening on the exam ports.' -ForegroundColor Green
+Write-Host '[ OK ] Nothing is listening on the exam ports. Tailscale Funnel was left as it was.' -ForegroundColor Green
 
 $backup = $cfg['BACKUP_DIR']
 if (-not [System.IO.Path]::IsPathRooted($backup)) { $backup = Join-Path $RepoRoot $backup }

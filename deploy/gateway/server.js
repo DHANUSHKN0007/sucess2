@@ -1,6 +1,7 @@
 'use strict';
-// The one public entry point for an exam: serves the built student portal and forwards only the
-// allowlisted student/recovery API routes to the lab server. It listens on loopback only; Tailscale is the way in.
+// A public entry point: serves one built portal and forwards only that portal's allowlisted API routes to one backend.
+// One instance per portal, chosen by GATEWAY_PROFILE: "student" forwards to the lab server, "admin" and "coe" forward to
+// the central backend. It listens on loopback only; Tailscale is the way in.
 const http = require('http');
 const fs = require('fs');
 const net = require('net');
@@ -33,26 +34,116 @@ const ALLOWED = new Set([
   'GET /api/recovery/config',
 ]);
 
-// Only these client headers reach the lab server. Everything else is dropped, which is what keeps
+// A staff route is "METHOD /path". "*" stands for exactly one path segment and a trailing "/**" for anything below it.
+// A segment may not be dot-only or hold an encoded dot, slash or backslash, so no spelling climbs out of a listed prefix.
+const SEGMENT = "(?:[A-Za-z0-9_~!$&'()*+,;=:@-]|\\.(?!\\.*(?:/|$))|%(?!2[eEfF]|5[cC])[0-9A-Fa-f]{2})+";
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function compileRoutes(list) {
+  const exact = new Set();
+  const patterns = [];
+  for (const entry of list) {
+    const [method, route] = entry.split(' ');
+    if (!route.includes('*')) { exact.add(entry); continue; }
+    const parts = route.split('/').map((seg) => (seg === '**' ? `${SEGMENT}(?:/${SEGMENT})*` : seg === '*' ? SEGMENT : escapeRe(seg)));
+    patterns.push({ method, re: new RegExp(`^${parts.join('/')}$`) });
+  }
+  return (method, pathname) => exact.has(`${method} ${pathname}`) || patterns.some((p) => p.method === method && p.re.test(pathname));
+}
+
+const ALL_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+
+// Admin portal (principal, HOD and admin users). Every call it makes is under /auth, /principal or /hod, plus the health
+// probe and the event stream; the token and role checks on each are central's.
+const ADMIN_ROUTES = [
+  'GET /api/v1/health', 'GET /api/v1/events',
+  'POST /api/v1/auth/login', 'POST /api/v1/auth/logout', 'GET /api/v1/auth/me', 'POST /api/v1/auth/change-password',
+  'PATCH /api/v1/auth/profile', 'PATCH /api/v1/auth/preferences/theme',
+  ...ALL_METHODS.flatMap((m) => [`${m} /api/v1/principal/**`, `${m} /api/v1/hod/**`]),
+];
+
+// COE portal: its central calls, listed from every centralRequest/centralUploadRequest/centralBlobRequest in its source.
+// Its seven lab-server calls (monitoring, workstation-bind, pc-recovery, verify-unlock, labs/servers, package-receipt) are
+// absent on purpose: the lab server answers staff routes only to this PC.
+const COE_ROUTES = [
+  'GET /api/v1/health', 'GET /api/v1/events',
+  'POST /api/v1/auth/coe/login', 'POST /api/v1/auth/coe/logout', 'POST /api/v1/auth/coe/change-password', 'PATCH /api/v1/auth/profile',
+  'GET /api/v1/audit/logs',
+  'GET /api/v1/course-outcomes', 'GET /api/v1/course-outcomes/*', 'GET /api/v1/course-outcomes/*/revisions/*/document',
+  'POST /api/v1/course-outcomes/*/review',
+  'GET /api/v1/examinations/scheduled', 'GET /api/v1/examinations/unlock-credentials', 'GET /api/v1/examinations/*',
+  'POST /api/v1/examinations/schedule', 'PUT /api/v1/examinations/*', 'DELETE /api/v1/examinations/*',
+  'GET /api/v1/examinations/*/question-paper-archive', 'GET /api/v1/examinations/*/question-sets',
+  'GET /api/v1/examinations/*/sittings/*/question-paper-archive/answer-key/download',
+  'GET /api/v1/examinations/*/sittings/*/question-paper-archive/data',
+  'GET /api/v1/examinations/*/sittings/*/question-paper-archive/download',
+  'GET /api/v1/examinations/*/sittings/*/question-paper-archive/download-excel',
+  'POST /api/v1/examinations/*/cancel', 'POST /api/v1/examinations/*/confirm-schedule', 'POST /api/v1/examinations/*/examiners',
+  'POST /api/v1/examinations/*/prepare-and-send-package', 'POST /api/v1/examinations/*/retry-transfer',
+  'POST /api/v1/examinations/*/select-set', 'PUT /api/v1/examinations/*/settings', 'PUT /api/v1/examinations/*/sittings',
+  'POST /api/v1/examinations/*/sittings/*/unlock-credential',
+  'POST /api/v1/examinations/*/sittings/*/unlock-credential/regenerate',
+  'POST /api/v1/examinations/*/sittings/*/unlock-credential/revoke',
+  'GET /api/v1/institution/departments', 'GET /api/v1/institution/eligibility', 'GET /api/v1/institution/laboratories',
+  'GET /api/v1/institution/published-question-sets', 'GET /api/v1/institution/semesters', 'GET /api/v1/institution/subjects',
+  'POST /api/v1/institution/laboratories', 'PATCH /api/v1/institution/laboratories/*',
+  'GET /api/v1/results/answer-key-corrections', 'GET /api/v1/results/examinations',
+  'POST /api/v1/results/answer-key-corrections/*/review', 'POST /api/v1/results/import-verified',
+  'POST /api/v1/results/verify-upload', 'POST /api/v1/results/*/approve-release',
+];
+
+const CSP_STUDENT = "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
+  + "img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+// Staff pages also show uploaded images and PDFs from blob: URLs, run the in-browser OCR/PDF workers, and compile WebAssembly.
+const CSP_STAFF = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' https://fonts.googleapis.com; "
+  + "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; worker-src 'self' blob:; frame-src 'self' blob:; "
+  + "object-src 'self' blob:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
+const STAFF_BODY_BYTES = 60 * 1024 * 1024; // central accepts uploads up to 55 MB
+const LOGIN_BODY_BYTES = 16 * 1024;
+
+const PROFILES = {
+  student: {
+    routes: [...ALLOWED], loginRoutes: ['/api/student/login', '/api/instructor/login'], csp: CSP_STUDENT, requireBearer: false,
+    portDefault: 3002, upstreamPortEnv: 'LAB_PORT', upstreamPortDefault: 8082, maxBodyBytes: 1024 * 1024,
+    portalDir: ['student-portal (Final)', 'student-portal (Final)', 'student-portal'], logName: 'gateway.log',
+    unavailable: ['LAB_SERVER_UNAVAILABLE', 'The lab server is not reachable. Tell the invigilator.'],
+    timeout: ['GATEWAY_TIMEOUT', 'The lab server took too long to answer. Tell the invigilator.'],
+  },
+  admin: {
+    routes: ADMIN_ROUTES, loginRoutes: ['/api/v1/auth/login'], csp: CSP_STAFF, requireBearer: true,
+    portDefault: 3003, upstreamPortEnv: 'CENTRAL_PORT', upstreamPortDefault: 8081, maxBodyBytes: STAFF_BODY_BYTES,
+    portalDir: ['admin-portal (7)'], logName: 'gateway-admin.log',
+    unavailable: ['CENTRAL_UNAVAILABLE', 'The central server is not reachable. Try again shortly.'],
+    timeout: ['GATEWAY_TIMEOUT', 'The central server took too long to answer. Try again shortly.'],
+  },
+  coe: {
+    routes: COE_ROUTES, loginRoutes: ['/api/v1/auth/coe/login'], csp: CSP_STAFF, requireBearer: true,
+    portDefault: 3004, upstreamPortEnv: 'CENTRAL_PORT', upstreamPortDefault: 8081, maxBodyBytes: STAFF_BODY_BYTES,
+    portalDir: ['coe-portal (7)'], logName: 'gateway-coe.log',
+    unavailable: ['CENTRAL_UNAVAILABLE', 'The central server is not reachable. Try again shortly.'],
+    timeout: ['GATEWAY_TIMEOUT', 'The central server took too long to answer. Try again shortly.'],
+  },
+};
+
+// Only these client headers reach the backend. Everything else is dropped, which is what keeps
 // X-Simulated-Time-Ms, X-Effective-Time-Ms and X-Bypass-Start-Check from ever arriving.
 const FORWARDED_HEADERS = ['authorization', 'content-type', 'accept', 'user-agent'];
-
-// The portal pulls Inter and Merriweather from Google Fonts; nothing else is loaded from outside.
-const CSP = "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
-  + "img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.woff': 'font/woff', '.txt': 'text/plain; charset=utf-8',
+  // A module worker is refused unless it arrives as JavaScript, and WebAssembly streams only as application/wasm.
+  '.mjs': 'text/javascript; charset=utf-8', '.wasm': 'application/wasm', '.pdf': 'application/pdf',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 };
 
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'proxy-authenticate', 'proxy-authorization']);
-const UPSTREAM_TIMEOUT_MS = 60000; // above the 30 s the lab server may hold a slowed instructor login
+const UPSTREAM_TIMEOUT_MS = 60000; // above the 30 s the backends may hold a slowed login
 const HASHED_ASSET = /^\/assets\/.+-[\w-]{8}\.\w+$/;
 
-const LOGIN_ROUTES = new Set(['/api/student/login', '/api/instructor/login']);
-const LOGIN_FAILURES_PER_MINUTE = 20; // per client address, across both logins; the lab server applies its own limits too
+const LOGIN_FAILURES_PER_MINUTE = 20; // per client address, across the profile's logins; the backend applies its own limits too
+const BEARER = /^Bearer [A-Fa-f0-9]{64}$/;
 // Header names that may carry the caller's address. Their values are logged the first time they appear, so the
 // deployer picks CLIENT_IP_HEADER from what Tailscale Funnel really sends rather than from an assumption.
 const ADDRESS_HEADER = /forward|real-ip|client|ingress|(^|-)ip($|-)|^via$|^tailscale/;
@@ -62,7 +153,7 @@ const ADDRESS_HEADER = /forward|real-ip|client|ingress|(^|-)ip($|-)|^via$|^tails
 // Rebuilding the portal needs a gateway restart.
 function loadPortal(distDir) {
   if (!fs.existsSync(path.join(distDir, 'index.html'))) {
-    throw new Error(`The student portal build was not found in ${distDir}. Build it first: npm ci && npm run build in the student-portal folder.`);
+    throw new Error(`The portal build was not found in ${distDir}. Build it first: npm ci && npm run build in the portal's folder (deploy/setup does this).`);
   }
   const files = new Map();
   for (const rel of fs.readdirSync(distDir, { recursive: true })) {
@@ -85,6 +176,10 @@ function openLog(file) {
 const printable = (s) => String(s).replace(/[^\x20-\x7e]/g, '?').slice(0, 200);
 
 function createGateway(cfg) {
+  const profile = PROFILES[cfg.profile || 'student'];
+  const allows = compileRoutes(cfg.routes || profile.routes);
+  const loginRoutes = new Set(cfg.loginRoutes || profile.loginRoutes);
+  const upstreamPort = cfg.upstreamPort || cfg.labPort;
   const portal = loadPortal(cfg.distDir);
   const log = cfg.logFile ? openLog(cfg.logFile) : () => {};
   const seenHeaders = new Set();
@@ -126,6 +221,12 @@ function createGateway(cfg) {
     res.writeHead(status, { 'Content-Type': type, 'Content-Length': Buffer.byteLength(body) });
     res.end(body);
   }
+  // An event stream cannot send headers, so it alone may carry the token in the query string.
+  function hasStaffToken(req, url, pathname) {
+    if (BEARER.test(req.headers.authorization || '')) return true;
+    const q = url.indexOf('?');
+    return pathname === '/api/v1/events' && q !== -1 && /^[A-Fa-f0-9]{64}$/.test(new URLSearchParams(url.slice(q + 1)).get('token') || '');
+  }
   const notFound = (res) => reply(res, 404, 'text/plain; charset=utf-8', 'Not Found');
   const fail = (res, status, errorCode, error) => reply(res, status, 'application/json; charset=utf-8', JSON.stringify({ error, errorCode }));
 
@@ -145,8 +246,8 @@ function createGateway(cfg) {
     res.end(req.method === 'HEAD' ? undefined : file.body);
   }
 
-  function proxy(req, res, client) {
-    if (Number(req.headers['content-length'] || 0) > cfg.maxBodyBytes) {
+  function proxy(req, res, client, maxBodyBytes) {
+    if (Number(req.headers['content-length'] || 0) > maxBodyBytes) {
       req.resume();
       return fail(res, 413, 'REQUEST_TOO_LARGE', 'Request body is too large.');
     }
@@ -155,7 +256,7 @@ function createGateway(cfg) {
     let tooLarge = false;
     req.on('data', (chunk) => {
       size += chunk.length;
-      if (size > cfg.maxBodyBytes) {
+      if (size > maxBodyBytes) {
         if (!tooLarge) fail(res, 413, 'REQUEST_TOO_LARGE', 'Request body is too large.');
         tooLarge = true;
       } else if (!tooLarge) {
@@ -166,18 +267,18 @@ function createGateway(cfg) {
   }
 
   function forward(req, res, client, body) {
-    const headers = { host: `127.0.0.1:${cfg.labPort}`, 'content-length': body.length };
+    const headers = { host: `127.0.0.1:${upstreamPort}`, 'content-length': body.length };
     for (const name of FORWARDED_HEADERS) if (req.headers[name]) headers[name] = req.headers[name];
-    // The lab server refuses staff routes on any request carrying this. Set here for every proxied request,
+    // The backend refuses local-only routes on any request carrying this. Set here for every proxied request,
     // after the copy above, so a client-supplied value can never stand in for it or be passed through.
     headers['x-gateway-origin'] = 'gateway';
-    // The lab server keys its login limits on this. Only ever the address checked in clientOf(); a client-sent
+    // The backend keys its login limits on this. Only ever the address checked in clientOf(); a client-sent
     // X-Gateway-Client is never copied, and with no trusted address none is sent.
     if (client) headers['x-gateway-client'] = client;
 
     // The allowlisted path is forwarded as written; it is never decoded or normalised on the way.
-    const upstream = http.request({ host: '127.0.0.1', port: cfg.labPort, method: req.method, path: req.url, headers }, (upRes) => {
-      if (client && upRes.statusCode === 401 && LOGIN_ROUTES.has(req.url.split('?')[0])) {
+    const upstream = http.request({ host: '127.0.0.1', port: upstreamPort, method: req.method, path: req.url, headers }, (upRes) => {
+      if (client && upRes.statusCode === 401 && loginRoutes.has(req.url.split('?')[0])) {
         loginFailures.set(client, [...(loginFailures.get(client) || []), Date.now()]);
       }
       const out = {};
@@ -193,15 +294,15 @@ function createGateway(cfg) {
     upstream.setTimeout(UPSTREAM_TIMEOUT_MS, () => upstream.destroy(new Error('timeout')));
     upstream.on('error', (err) => {
       if (res.headersSent) return res.destroy();
-      if (err.message === 'timeout') return fail(res, 504, 'GATEWAY_TIMEOUT', 'The lab server took too long to answer. Tell the invigilator.');
-      fail(res, 502, 'LAB_SERVER_UNAVAILABLE', 'The lab server is not reachable. Tell the invigilator.');
+      if (err.message === 'timeout') return fail(res, 504, ...profile.timeout);
+      fail(res, 502, ...profile.unavailable);
     });
     res.on('close', () => { if (!res.writableEnded) upstream.destroy(); });
     upstream.end(body);
   }
 
   const server = http.createServer((req, res) => {
-    res.setHeader('Content-Security-Policy', CSP);
+    res.setHeader('Content-Security-Policy', profile.csp);
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -215,14 +316,22 @@ function createGateway(cfg) {
     // Only method, path (no query string), status and client are logged: never bodies or tokens.
     res.on('finish', () => log(`${new Date().toISOString()} ${req.method} ${printable(pathname)} ${res.statusCode} ${client || '-'}`));
 
-    if (pathname === '/api' || pathname.startsWith('/api/')) {
+    // /lab-api is the COE portal's lab-server prefix: it is never forwarded, but it must answer 404, not the portal's HTML.
+    if (/^\/(?:lab-)?api(?:\/|$)/.test(pathname)) {
       res.setHeader('Cache-Control', 'no-store');
-      if (!ALLOWED.has(`${req.method} ${pathname}`)) return notFound(res);
-      // Without a trusted client address there is nothing to count against here; the lab server's own limits apply.
-      if (client && LOGIN_ROUTES.has(pathname) && recentLoginFailures(client, Date.now()) >= LOGIN_FAILURES_PER_MINUTE) {
+      if (!allows(req.method, pathname)) return notFound(res);
+      const isLogin = loginRoutes.has(pathname);
+      // Without a trusted client address there is nothing to count against here; the backend's own limits apply.
+      if (client && isLogin && recentLoginFailures(client, Date.now()) >= LOGIN_FAILURES_PER_MINUTE) {
         return fail(res, 429, 'RATE_LIMITED', 'Too many failed login attempts. Try again in a minute.');
       }
-      return proxy(req, res, client);
+      // A staff caller with no token is turned away before its body is read, so only a signed-in user can make the
+      // gateway buffer a large upload. The token itself, its expiry and the role are checked by central, not here.
+      if (profile.requireBearer && !isLogin && pathname !== '/api/v1/health' && !hasStaffToken(req, url, pathname)) {
+        req.resume();
+        return fail(res, 401, 'UNAUTHORIZED', 'Sign in required.');
+      }
+      return proxy(req, res, client, isLogin ? Math.min(cfg.maxBodyBytes, LOGIN_BODY_BYTES) : cfg.maxBodyBytes);
     }
     serveStatic(req, res, pathname);
   });
@@ -234,17 +343,21 @@ function createGateway(cfg) {
 }
 
 function fromEnv() {
-  const port = Number(process.env.GATEWAY_PORT || 3002);
-  const labPort = Number(process.env.LAB_PORT || 8082);
+  const name = (process.env.GATEWAY_PROFILE || 'student').trim().toLowerCase();
+  const profile = PROFILES[name];
+  if (!profile) throw new Error(`GATEWAY_PROFILE must be student, admin or coe, not "${process.env.GATEWAY_PROFILE}".`);
+  const port = Number(process.env.GATEWAY_PORT || profile.portDefault);
+  const upstreamPort = Number(process.env[profile.upstreamPortEnv] || profile.upstreamPortDefault);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`GATEWAY_PORT must be a port number, not "${process.env.GATEWAY_PORT}".`);
-  if (!Number.isInteger(labPort) || labPort < 1 || labPort > 65535) throw new Error(`LAB_PORT must be a port number, not "${process.env.LAB_PORT}".`);
+  if (!Number.isInteger(upstreamPort) || upstreamPort < 1 || upstreamPort > 65535) throw new Error(`${profile.upstreamPortEnv} must be a port number, not "${process.env[profile.upstreamPortEnv]}".`);
   const root = path.resolve(__dirname, '..', '..');
   return {
+    profile: name,
     port,
-    labPort,
-    distDir: path.resolve(process.env.PORTAL_DIST_DIR || path.join(root, 'student-portal (Final)', 'student-portal (Final)', 'student-portal', 'dist')),
-    logFile: process.env.GATEWAY_LOG_FILE || path.join(root, 'CampusExam', 'lab_storage', 'logs', 'gateway.log'),
-    maxBodyBytes: Number(process.env.GATEWAY_MAX_BODY_BYTES || 1024 * 1024),
+    upstreamPort,
+    distDir: path.resolve(process.env.PORTAL_DIST_DIR || path.join(root, ...profile.portalDir, 'dist')),
+    logFile: process.env.GATEWAY_LOG_FILE || path.join(root, 'CampusExam', 'lab_storage', 'logs', profile.logName),
+    maxBodyBytes: Number(process.env.GATEWAY_MAX_BODY_BYTES || profile.maxBodyBytes),
     // No default on purpose: which header carries the caller's address behind Tailscale Funnel is read from the log, not assumed.
     clientIpHeader: (process.env.CLIENT_IP_HEADER || '').trim().toLowerCase(),
   };
@@ -262,7 +375,7 @@ if (require.main === module) {
     });
     // Loopback only. Nothing here may listen on the LAN.
     server.listen(cfg.port, '127.0.0.1', () => {
-      console.log(`Exam gateway listening on http://127.0.0.1:${cfg.port} -> lab server 127.0.0.1:${cfg.labPort}`);
+      console.log(`Exam gateway (${cfg.profile}) listening on http://127.0.0.1:${cfg.port} -> 127.0.0.1:${cfg.upstreamPort}`);
       console.log(`Portal: ${cfg.distDir}`);
       console.log(`Access log: ${cfg.logFile}`);
       console.log(cfg.clientIpHeader
@@ -275,4 +388,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { createGateway, ALLOWED };
+module.exports = { createGateway, compileRoutes, ALLOWED, PROFILES };

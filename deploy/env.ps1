@@ -27,6 +27,7 @@ function Get-ExamEnv {
     $cfg = Read-DotEnv (Join-Path $RepoRoot '.env')
     $defaults = [ordered]@{
         PORT = '8081'; BIND = '127.0.0.1'; LAB_PORT = '8082'; LAB_BIND = '127.0.0.1'; GATEWAY_PORT = '3002'
+        ADMIN_GATEWAY_PORT = '3003'; COE_GATEWAY_PORT = '3004'
         LAB_TEST_MODE = 'false'; LAB_STAFF_ALLOW_REMOTE = 'false'; ALLOW_SAMPLE_EXAM = 'false'; BACKUP_DIR = 'backups'
     }
     foreach ($k in $defaults.Keys) {
@@ -93,7 +94,8 @@ function Get-TailscaleStatus {
     try { return ((& $ts status --json) -join "`n") | ConvertFrom-Json } catch { return $null }
 }
 
-# Where the managed services listen, from the effective config. Central, lab server, gateway, then the COE and admin portals.
+# Where the managed services listen, from the effective config. Central, lab server, the student, admin and COE gateways,
+# then the admin and COE portals' own dev servers (host PC only).
 function Get-ExamPorts($Cfg) {
-    return @([int]$Cfg['PORT'], [int]$Cfg['LAB_PORT'], [int]$Cfg['GATEWAY_PORT'], 3000, 3001)
+    return @([int]$Cfg['PORT'], [int]$Cfg['LAB_PORT'], [int]$Cfg['GATEWAY_PORT'], [int]$Cfg['ADMIN_GATEWAY_PORT'], [int]$Cfg['COE_GATEWAY_PORT'], 3000, 3001)
 }

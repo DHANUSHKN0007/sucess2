@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # A switch the file leaves out gets a safe default, so a stray value in the deployer's shell never reaches a service.
 load_exam_env() {
     local line key val pair
-    for key in PORT BIND LAB_PORT LAB_BIND GATEWAY_PORT LAB_TEST_MODE LAB_STAFF_ALLOW_REMOTE ALLOW_SAMPLE_EXAM BACKUP_DIR; do
+    for key in PORT BIND LAB_PORT LAB_BIND GATEWAY_PORT ADMIN_GATEWAY_PORT COE_GATEWAY_PORT LAB_TEST_MODE LAB_STAFF_ALLOW_REMOTE ALLOW_SAMPLE_EXAM BACKUP_DIR; do
         unset "$key"
     done
     while IFS= read -r line || [ -n "$line" ]; do
@@ -22,6 +22,7 @@ load_exam_env() {
         if [ -n "$key" ]; then export "$key=$val"; fi
     done < "$REPO_ROOT/.env"
     for pair in PORT=8081 BIND=127.0.0.1 LAB_PORT=8082 LAB_BIND=127.0.0.1 GATEWAY_PORT=3002 \
+                ADMIN_GATEWAY_PORT=3003 COE_GATEWAY_PORT=3004 \
                 LAB_TEST_MODE=false LAB_STAFF_ALLOW_REMOTE=false ALLOW_SAMPLE_EXAM=false BACKUP_DIR=backups; do
         key="${pair%%=*}"
         if [ -z "${!key}" ]; then export "$key=${pair#*=}"; fi
@@ -66,6 +67,7 @@ tailscale_query() {
         });' "$1"
 }
 
+# gateway_healthy [port [path]]: with no arguments, the student gateway's /api/health.
 gateway_healthy() {
-    node -e 'fetch(process.argv[1]).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))' "http://127.0.0.1:$GATEWAY_PORT/api/health"
+    node -e 'fetch(process.argv[1]).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))' "http://127.0.0.1:${1:-$GATEWAY_PORT}${2:-/api/health}"
 }

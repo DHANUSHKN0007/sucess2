@@ -225,3 +225,89 @@ test('the access log shows which address headers arrive and never holds tokens o
   assert.match(log, / GET \/api\/monitoring\/sessions 404 -\n/);
   for (const secret of ['TOKENSECRET', 'BODYSECRET', 'QUERYSECRET']) assert.doesNotMatch(log, new RegExp(secret));
 });
+
+// ---- admin and coe profiles: same gateway, forwarding to central ----
+const TOKEN = 'a'.repeat(64);
+const bearer = { authorization: `Bearer ${TOKEN}` };
+
+test('admin profile forwards only its own routes and answers 404 to everything else', async (t) => {
+  const { port, seen } = await setup(t, { profile: 'admin' });
+  assert.equal((await send(port, { path: '/api/v1/health' })).status, 200);
+  assert.equal((await send(port, { method: 'POST', path: '/api/v1/auth/login', body: '{}' })).status, 200);
+  assert.equal((await send(port, { path: '/api/v1/hod/subjects', headers: bearer })).status, 200);
+  assert.equal((await send(port, { method: 'PATCH', path: '/api/v1/principal/hods/7', headers: bearer, body: '{}' })).status, 200);
+  const before = seen.length;
+  for (const [method, p] of [['POST', '/api/v1/auth/coe/login'], ['GET', '/api/v1/examinations/scheduled'], ['GET', '/api/v1/labs/servers'],
+    ['GET', '/api/v1/monitoring/sessions'], ['POST', '/api/v1/events/broadcast'], ['POST', '/api/v1/results/import-package'],
+    ['GET', '/api/v1/coe/anything'], ['GET', '/lab-api/health'], ['GET', '/api/health'], ['GET', '/api/v1/hod'], ['GET', '/api/v1/hodx/a']]) {
+    assert.equal((await send(port, { method, path: p, headers: bearer })).status, 404, `${method} ${p}`);
+  }
+  assert.equal(seen.length, before, 'none of them reached central');
+});
+
+test('coe profile forwards only the routes the COE portal calls', async (t) => {
+  const { port, seen } = await setup(t, { profile: 'coe' });
+  assert.equal((await send(port, { method: 'POST', path: '/api/v1/auth/coe/login', body: '{}' })).status, 200);
+  assert.equal((await send(port, { path: '/api/v1/examinations/EXAM-CS501-12/sittings/S1/question-paper-archive/data', headers: bearer })).status, 200);
+  assert.equal((await send(port, { method: 'POST', path: '/api/v1/examinations/7/prepare-and-send-package', headers: bearer, body: '{}' })).status, 200);
+  const before = seen.length;
+  for (const [method, p] of [['POST', '/api/v1/auth/login'], ['GET', '/api/v1/hod/subjects'], ['GET', '/api/v1/principal/hods'],
+    ['GET', '/api/v1/labs/servers'], ['GET', '/api/v1/monitoring/sessions'], ['POST', '/api/v1/events/broadcast'],
+    ['POST', '/api/v1/results/import-package'], ['GET', '/api/v1/examinations'], ['DELETE', '/api/v1/examinations/7/sittings/9']]) {
+    assert.equal((await send(port, { method, path: p, headers: bearer })).status, 404, `${method} ${p}`);
+  }
+  assert.equal(seen.length, before, 'none of them reached central');
+});
+
+test('staff profiles turn away a caller with no valid token before reading its body', async (t) => {
+  const { port, seen } = await setup(t, { profile: 'admin' });
+  for (const headers of [{}, { authorization: 'Bearer short' }, { authorization: `Basic ${TOKEN}` }]) {
+    const res = await send(port, { path: '/api/v1/hod/subjects', headers });
+    assert.equal(res.status, 401);
+    assert.equal(JSON.parse(res.body).errorCode, 'UNAUTHORIZED');
+  }
+  assert.equal((await send(port, { path: `/api/v1/hod/subjects?token=${TOKEN}` })).status, 401, 'a query token is for the event stream only');
+  assert.equal(seen.length, 0);
+  assert.equal((await send(port, { path: `/api/v1/events?token=${TOKEN}` })).status, 200, 'the event stream may carry it in the query');
+  assert.equal((await send(port, { path: '/api/v1/events?token=nothex' })).status, 401);
+});
+
+test('staff wildcard routes ignore dot segments and encoded dots, slashes and backslashes', async (t) => {
+  const { port, seen } = await setup(t, { profile: 'admin' });
+  for (const p of ['/api/v1/hod/../auth/login', '/api/v1/hod/%2e%2e/auth/login', '/api/v1/hod/%2E%2E/principal/hods', '/api/v1/hod/a%2fb',
+    '/api/v1/hod/a%5cb', '/api/v1/hod/./x', '/api/v1/hod//x', '/api/v1/hod/', '/api/v1/hod/a/../b']) {
+    assert.equal((await send(port, { path: p, headers: bearer })).status, 404, p);
+  }
+  assert.equal(seen.length, 0);
+  assert.equal((await send(port, { path: '/api/v1/hod/students/4MH24CS001', headers: bearer })).status, 200, 'an ordinary id still passes');
+});
+
+test('staff profiles forward only the safe headers, mark the request as from a gateway, and never pass time headers', async (t) => {
+  const { port, seen } = await setup(t, { profile: 'coe', clientIpHeader: 'x-real-ip' });
+  await send(port, { method: 'POST', path: '/api/v1/auth/coe/login', body: '{}', headers: {
+    'content-type': 'application/json', 'x-gateway-origin': 'nope', 'x-gateway-client': '9.9.9.9', 'x-real-ip': '203.0.113.7',
+    'x-simulated-time-ms': '1', 'x-bypass-start-check': 'true', 'x-effective-time-ms': '2', cookie: 'a=b' } });
+  const h = seen[0].headers;
+  assert.equal(h['x-gateway-origin'], 'gateway');
+  assert.equal(h['x-gateway-client'], '203.0.113.7', 'the trusted address replaces whatever the client sent');
+  for (const name of ['x-simulated-time-ms', 'x-bypass-start-check', 'x-effective-time-ms', 'cookie']) assert.equal(h[name], undefined, name);
+});
+
+test('a staff gateway answers 502 CENTRAL_UNAVAILABLE when central is down', async (t) => {
+  const down = http.createServer();
+  const downPort = await listen(down);
+  await new Promise((r) => down.close(r));
+  const { port } = await setup(t, { profile: 'coe', labPort: downPort });
+  const res = await send(port, { method: 'POST', path: '/api/v1/auth/coe/login', body: '{}' });
+  assert.equal(res.status, 502);
+  assert.equal(JSON.parse(res.body).errorCode, 'CENTRAL_UNAVAILABLE');
+});
+
+test('staff logins are cut off after 20 failures a minute from one trusted client and the body cap is 16 KB', async (t) => {
+  const { port } = await setup(t, { profile: 'admin', clientIpHeader: 'x-real-ip', labStatus: 401, maxBodyBytes: 60 * 1024 * 1024 });
+  const login = (ip, body = '{}') => send(port, { method: 'POST', path: '/api/v1/auth/login', body, headers: { 'x-real-ip': ip } });
+  for (let i = 0; i < 20; i++) assert.equal((await login('198.51.100.1')).status, 401);
+  assert.equal((await login('198.51.100.1')).status, 429);
+  assert.equal((await login('198.51.100.2')).status, 401, 'another client is unaffected');
+  assert.equal((await login('198.51.100.3', 'x'.repeat(17 * 1024))).status, 413);
+});
