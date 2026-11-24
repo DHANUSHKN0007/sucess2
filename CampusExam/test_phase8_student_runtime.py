@@ -112,7 +112,7 @@ def main():
         log_test(2, "Invalid USN rejected without leaking roster", False, "Expected 401 but request succeeded")
     except urllib.error.HTTPError as e:
         body = json.loads(e.read().decode())
-        success = e.code == 401 and body.get("errorCode") == "STUDENT_NOT_ALLOCATED"
+        success = e.code == 401 and body.get("errorCode") == "INVALID_CREDENTIALS"
         log_test(2, "Invalid USN rejected without leaking roster", success, f"HTTP {e.code}, errorCode: {body.get('errorCode')}")
     except Exception as e:
         log_test(2, "Invalid USN rejected without leaking roster", False, str(e))
@@ -128,7 +128,7 @@ def main():
     except urllib.error.HTTPError as e:
         raw_err = e.read().decode()
         body = json.loads(raw_err)
-        success = e.code == 401 and body.get("errorCode") == "INVALID_DOB" and "1999-12-31" not in raw_err
+        success = e.code == 401 and body.get("errorCode") == "INVALID_CREDENTIALS" and "1999-12-31" not in raw_err
         log_test(3, "Invalid DOB rejected without plaintext leakage", success, f"HTTP {e.code}, errorCode: {body.get('errorCode')}")
     except Exception as e:
         log_test(3, "Invalid DOB rejected without plaintext leakage", False, str(e))
@@ -143,7 +143,7 @@ def main():
         log_test(4, "Student absent from frozen roster rejected", False, "Expected 401")
     except urllib.error.HTTPError as e:
         body = json.loads(e.read().decode())
-        success = e.code == 401 and body.get("errorCode") == "STUDENT_NOT_ALLOCATED"
+        success = e.code == 401 and body.get("errorCode") == "INVALID_CREDENTIALS"
         log_test(4, "Student absent from frozen roster rejected", success, f"HTTP {e.code}, errorCode: {body.get('errorCode')}")
     except Exception as e:
         log_test(4, "Student absent from frozen roster rejected", False, str(e))
@@ -165,12 +165,13 @@ def main():
 
     # 6. Login before permitted examination start
     try:
-        # Package 22 is scheduled for 2026-12-06. Candidate logging in now sees availabilityState NOT_STARTED
+        # 10 minutes before the scheduled start is inside the 30-minute early-login window
+        sim_early = {"X-Simulated-Time-Ms": str(parse_ist_time(SCHEDULED_DATE, START_TIME) - 600000)}
         code, resp = http_post(f"{LAB_SERVER_URL}/api/student/login", {
             "usn": "4MH21CS006",
             "dateOfBirth": "2004-01-06",
             "workstationId": "PC-06"
-        })
+        }, headers=sim_early)
         sess_info = resp.get("examSession", {})
         token_s6 = resp.get("student", {}).get("sessionToken")
         # Attempting to start without bypass must be rejected with 403
@@ -180,11 +181,11 @@ def main():
                 "sessionId": EXAM_ID,
                 "studentUsn": "4MH21CS006",
                 "instructionsConfirmed": True
-            }, headers={"Authorization": f"Bearer {token_s6}"})
+            }, headers={"Authorization": f"Bearer {token_s6}", **sim_early})
             log_test(6, "Login before permitted start: Start action disabled", False, "Expected 403 before start time")
         except urllib.error.HTTPError as e:
             body = json.loads(e.read().decode())
-            success = e.code == 403 and body.get("errorCode") == "EXAM_NOT_STARTED" and sess_info.get("availabilityState") == "NOT_STARTED"
+            success = e.code == 403 and body.get("errorCode") == "EXAM_NOT_STARTED" and sess_info.get("availabilityState") == "SCHEDULED_WAITING"
             log_test(6, "Login before permitted start: Start action disabled", success, f"availabilityState: {sess_info.get('availabilityState')}, HTTP 403 on start")
     except Exception as e:
         log_test(6, "Login before permitted start: Start action disabled", False, str(e))
@@ -195,9 +196,8 @@ def main():
             "examinationId": EXAM_ID,
             "sessionId": EXAM_ID,
             "studentUsn": "4MH21CS006",
-            "instructionsConfirmed": True,
-            "forceStart": True
-        }, headers={"Authorization": f"Bearer {token_s6}"})
+            "instructionsConfirmed": True
+        }, headers={"Authorization": f"Bearer {token_s6}", "X-Simulated-Time-Ms": str(parse_ist_time(SCHEDULED_DATE, START_TIME))})
         expected_full_sec = DURATION_MINUTES * 60
         success = code == 200 and resp.get("examStarted") is True and resp.get("remainingSeconds") == expected_full_sec
         log_test(7, "Start at exact scheduled time gives full duration", success, f"examStarted: {resp.get('examStarted')}, remainingSeconds: {resp.get('remainingSeconds')}")
