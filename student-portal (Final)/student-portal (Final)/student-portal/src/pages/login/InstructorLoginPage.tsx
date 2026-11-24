@@ -41,7 +41,7 @@ export const InstructorLoginPage: React.FC = () => {
     let active = true;
     const checkBackend = async () => {
       try {
-        const res = await fetch(`${LAB_API_BASE_URL}/health`, { signal: AbortSignal.timeout(3000) });
+        const res = await fetch(`${LAB_API_BASE_URL}/api/health`, { signal: AbortSignal.timeout(3000) });
         if (active) setBackendOnline(res.ok);
       } catch {
         if (active) setBackendOnline(false);

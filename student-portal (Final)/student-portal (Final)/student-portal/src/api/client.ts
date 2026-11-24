@@ -60,28 +60,23 @@ export class ApiClient {
   private errorInterceptors: ErrorInterceptor[] = [];
 
   constructor() {
-    let resolvedUrl = '';
+    // Same-origin by default: the page and the API are served from one host (the gateway), so relative URLs work on
+    // localhost, a LAN and behind an HTTPS tunnel alike. Endpoints already begin with /api/, so the base is '' and
+    // not '/api'. Precedence: build-time env, window.__ENV__, a localStorage override for debugging, then ''.
+    let resolvedUrl = (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_LAB_API_BASE_URL || import.meta.env?.VITE_API_URL)) || '';
 
-    if (typeof window !== 'undefined') {
+    if (!resolvedUrl && typeof window !== 'undefined') {
       const winEnv = (window as any).__ENV__;
-      const storedUrl = localStorage.getItem('mitm_lab_api_url');
-      if (winEnv?.VITE_LAB_API_BASE_URL) {
-        resolvedUrl = winEnv.VITE_LAB_API_BASE_URL;
-      } else if (winEnv?.VITE_API_URL) {
-        resolvedUrl = winEnv.VITE_API_URL;
-      } else if (storedUrl) {
-        resolvedUrl = storedUrl;
-      } else if (window.location && window.location.hostname && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-        // Automatically connect to the physical Lab Server running on the host machine serving this portal
-        resolvedUrl = `http://${window.location.hostname}:8082`;
+      let storedUrl: string | null = null;
+      try {
+        storedUrl = localStorage.getItem('mitm_lab_api_url');
+      } catch {
+        // Storage can be blocked; fall through to same-origin.
       }
+      resolvedUrl = winEnv?.VITE_LAB_API_BASE_URL || winEnv?.VITE_API_URL || storedUrl || '';
     }
 
-    if (!resolvedUrl && typeof import.meta !== 'undefined') {
-      resolvedUrl = import.meta.env?.VITE_LAB_API_BASE_URL || import.meta.env?.VITE_API_URL || '';
-    }
-
-    this.baseUrl = (resolvedUrl && !resolvedUrl.includes(':8080') ? resolvedUrl : 'http://127.0.0.1:8082').replace(/\/+$/, '');
+    this.baseUrl = resolvedUrl.replace(/\/+$/, '');
 
     this.defaultTimeoutMs = Number(
       (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_TIMEOUT_MS) || 8000
@@ -104,6 +99,11 @@ export class ApiClient {
 
   public getBaseUrl(): string {
     return this.baseUrl.replace(/\/$/, '');
+  }
+
+  /** Where requests go, for messages and display: the page's own origin when the base URL is empty. */
+  public getServerLabel(): string {
+    return this.getBaseUrl() || (typeof window !== 'undefined' ? window.location.origin : 'this host');
   }
 
   public setBaseUrl(url: string): void {
@@ -265,8 +265,8 @@ export class ApiClient {
       const isTimeout = err instanceof Error && err.name === 'AbortError';
       const apiError = new ApiClientError(
         isTimeout
-          ? `Request timed out after ${timeout}ms. Check that the Lab Server at ${this.getBaseUrl()} is reachable.`
-          : `Unable to connect to the Lab Server at ${this.getBaseUrl()}. Check your network connection.`,
+          ? `Request timed out after ${timeout}ms. Check that the Lab Server at ${this.getServerLabel()} is reachable.`
+          : `Unable to connect to the Lab Server at ${this.getServerLabel()}. Check your network connection.`,
         0,
         isTimeout ? 'REQUEST_TIMEOUT' : 'NETWORK_ERROR',
         !isTimeout,

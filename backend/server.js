@@ -31,9 +31,14 @@ const dbPool = new Pool({
 
 const app = express();
 
-// Enable CORS for all local portal ports
+// Browsers may call this API only from these origins. The default is the local admin, COE and student portal ports;
+// set ALLOWED_ORIGINS (comma-separated) when they are served from other hosts. Requests without an Origin header
+// (same-origin, curl, other servers) are not subject to CORS and are unaffected.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
+  || [3000, 3001, 3002].flatMap((port) => [`http://localhost:${port}`, `http://127.0.0.1:${port}`]).join(','))
+  .split(',').map((origin) => origin.trim()).filter(Boolean);
 app.use(cors({
-  origin: true,
+  origin: (origin, callback) => callback(null, !origin || ALLOWED_ORIGINS.includes(origin)),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: [

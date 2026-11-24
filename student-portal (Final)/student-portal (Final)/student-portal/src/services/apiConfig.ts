@@ -7,7 +7,7 @@ import { apiClient, ApiClientError, RequestOptions } from '../api/client';
 
 export type ApiMode = 'development' | 'integration';
 
-export const LAB_API_BASE_URL: string = apiClient.getBaseUrl();
+export const LAB_API_BASE_URL: string = apiClient.getServerLabel();
 
 export const API_MODE: ApiMode =
   typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_MODE === 'development'
