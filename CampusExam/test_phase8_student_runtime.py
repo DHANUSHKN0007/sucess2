@@ -84,7 +84,8 @@ def main():
     try:
         code, resp = http_post(f"{LAB_SERVER_URL}/api/student/login", {
             "usn": "4MH21CS005",
-            "dateOfBirth": "2004-01-05"
+            "dateOfBirth": "2004-01-05",
+            "workstationId": "PC-05"
         })
         success = code == 200 and resp.get("authenticated") is True and resp.get("student", {}).get("usn") == "4MH21CS005"
         token_s5 = resp.get("student", {}).get("sessionToken")
@@ -105,7 +106,8 @@ def main():
     try:
         http_post(f"{LAB_SERVER_URL}/api/student/login", {
             "usn": "4MH21INVALID99",
-            "dateOfBirth": "2004-01-01"
+            "dateOfBirth": "2004-01-01",
+            "workstationId": "PC-91"
         })
         log_test(2, "Invalid USN rejected without leaking roster", False, "Expected 401 but request succeeded")
     except urllib.error.HTTPError as e:
@@ -119,7 +121,8 @@ def main():
     try:
         http_post(f"{LAB_SERVER_URL}/api/student/login", {
             "usn": "4MH21CS005",
-            "dateOfBirth": "1999-12-31"
+            "dateOfBirth": "1999-12-31",
+            "workstationId": "PC-05"
         })
         log_test(3, "Invalid DOB rejected without plaintext leakage", False, "Expected 401 but request succeeded")
     except urllib.error.HTTPError as e:
@@ -134,7 +137,8 @@ def main():
     try:
         http_post(f"{LAB_SERVER_URL}/api/student/login", {
             "usn": "4MH20ME001",
-            "dateOfBirth": "2003-05-15"
+            "dateOfBirth": "2003-05-15",
+            "workstationId": "PC-92"
         })
         log_test(4, "Student absent from frozen roster rejected", False, "Expected 401")
     except urllib.error.HTTPError as e:
@@ -148,7 +152,8 @@ def main():
     try:
         http_post(f"{LAB_SERVER_URL}/api/student/login", {
             "usn": "4MH22EC999",
-            "dateOfBirth": "2004-06-20"
+            "dateOfBirth": "2004-06-20",
+            "workstationId": "PC-93"
         })
         log_test(5, "Student from another sitting rejected by Lab Server", False, "Expected 401")
     except urllib.error.HTTPError as e:
@@ -163,7 +168,8 @@ def main():
         # Package 22 is scheduled for 2026-12-06. Candidate logging in now sees availabilityState NOT_STARTED
         code, resp = http_post(f"{LAB_SERVER_URL}/api/student/login", {
             "usn": "4MH21CS006",
-            "dateOfBirth": "2004-01-06"
+            "dateOfBirth": "2004-01-06",
+            "workstationId": "PC-06"
         })
         sess_info = resp.get("examSession", {})
         token_s6 = resp.get("student", {}).get("sessionToken")
@@ -203,7 +209,8 @@ def main():
         # Candidate 4MH21CS007 logs in and starts 30 minutes late
         code, resp = http_post(f"{LAB_SERVER_URL}/api/student/login", {
             "usn": "4MH21CS007",
-            "dateOfBirth": "2004-01-07"
+            "dateOfBirth": "2004-01-07",
+            "workstationId": "PC-07"
         })
         token_s7 = resp.get("student", {}).get("sessionToken")
         sched_start = parse_ist_time(SCHEDULED_DATE, START_TIME)
@@ -230,7 +237,7 @@ def main():
         versions_ok = True
         v_details = []
         for usn, dob, exp_ver in [("4MH21CS001", "2004-01-01", "A"), ("4MH21CS002", "2004-01-02", "B"), ("4MH21CS004", "2004-01-04", "D")]:
-            _, lresp = http_post(f"{LAB_SERVER_URL}/api/student/login", {"usn": usn, "dateOfBirth": dob})
+            _, lresp = http_post(f"{LAB_SERVER_URL}/api/student/login", {"usn": usn, "dateOfBirth": dob, "workstationId": f"PC-{usn[-2:]}"})
             t = lresp["student"]["sessionToken"]
             _, qresp = http_post(f"{LAB_SERVER_URL}/api/student/exam/start", {"examinationId": EXAM_ID, "sessionId": EXAM_ID, "studentUsn": usn, "instructionsConfirmed": True, "forceStart": True}, headers={"Authorization": f"Bearer {t}"})
             _, paper = http_get(f"{LAB_SERVER_URL}/api/student/exam/questions", headers={"Authorization": f"Bearer {t}"})
@@ -494,7 +501,7 @@ def main():
     # 27. Automatic deadline submission on expiry
     try:
         # Candidate 4MH21CS008 logs in and starts with expiry 1 second ago
-        _, l8 = http_post(f"{LAB_SERVER_URL}/api/student/login", {"usn": "4MH21CS008", "dateOfBirth": "2004-01-08"})
+        _, l8 = http_post(f"{LAB_SERVER_URL}/api/student/login", {"usn": "4MH21CS008", "dateOfBirth": "2004-01-08", "workstationId": "PC-08"})
         t8 = l8["student"]["sessionToken"]
         # Start exam
         http_post(f"{LAB_SERVER_URL}/api/student/exam/start", {
@@ -522,7 +529,7 @@ def main():
     # 28. Browser closure does not stop automatic submission (Background Server Expiry)
     try:
         # Candidate 4MH21CS009: server background worker auto-submits expired session
-        _, l9 = http_post(f"{LAB_SERVER_URL}/api/student/login", {"usn": "4MH21CS009", "dateOfBirth": "2004-01-09"})
+        _, l9 = http_post(f"{LAB_SERVER_URL}/api/student/login", {"usn": "4MH21CS009", "dateOfBirth": "2004-01-09", "workstationId": "PC-09"})
         t9 = l9["student"]["sessionToken"]
         http_post(f"{LAB_SERVER_URL}/api/student/exam/start", {
             "examinationId": EXAM_ID, "sessionId": EXAM_ID, "studentUsn": "4MH21CS009", "instructionsConfirmed": True, "forceStart": True

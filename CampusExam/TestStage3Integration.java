@@ -429,7 +429,7 @@ public class TestStage3Integration {
 
     private static void testLoginExpectFailure(String usn, String dob, long simulatedTimeMs, int expectedHttpCode, String expectedErrorCode, String passMessage) {
         try {
-            Map<String, Object> req = Map.of("usn", usn, "dateOfBirth", dob);
+            Map<String, Object> req = Map.of("usn", usn, "dateOfBirth", dob, "workstationId", "PC-" + usn);
             Map<String, String> headers = Map.of("X-Simulated-Time-Ms", String.valueOf(simulatedTimeMs));
             httpPostJson(LAB_URL + "/lab-api/student/login", req, null, headers);
             throw new RuntimeException("Expected login failure (" + expectedHttpCode + " " + expectedErrorCode + ") but login SUCCEEDED!");
@@ -447,7 +447,7 @@ public class TestStage3Integration {
     }
 
     private static Map<String, Object> testLoginSuccess(String usn, String dob, long simulatedTimeMs) throws Exception {
-        Map<String, Object> req = Map.of("usn", usn, "dateOfBirth", dob);
+        Map<String, Object> req = Map.of("usn", usn, "dateOfBirth", dob, "workstationId", "PC-" + usn);
         Map<String, String> headers = Map.of("X-Simulated-Time-Ms", String.valueOf(simulatedTimeMs));
         return httpPostJson(LAB_URL + "/lab-api/student/login", req, null, headers);
     }
