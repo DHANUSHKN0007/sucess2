@@ -8,6 +8,7 @@ import {
   StudentLoginResponse,
 } from '../types/examination';
 import { apiClient } from '../api/client';
+import { workstationService } from './workstationService';
 
 /**
  * Student Authentication Service
@@ -17,7 +18,8 @@ export const studentAuthService = {
   async login(credentials: StudentLoginRequest): Promise<StudentLoginResponse> {
     const response = await apiClient.post<StudentLoginResponse>(
       '/api/student/login',
-      credentials
+      // The machine ID is never typed by the student; the lab server needs it for its one-candidate-per-computer check.
+      { ...credentials, workstationId: workstationService.getWorkstationId() }
     );
 
     if (response.student?.sessionToken) {

@@ -59,13 +59,13 @@ The student portal never sends that field — `StudentLoginRequest` (`src/types/
    - Export a setter so an invigilator can overwrite it with the real sticker number.
    - `localStorage` is the correct scope here: the ID belongs to the **machine**, unlike the session token (see Phase 3).
 
-3. **Login form — make it meaningful.** Add a short, required **"Computer Number"** field to `src/pages/login/StudentLoginPage.tsx`, pre-filled from `workstationService` and editable. A random UUID stops the 409 but makes the safeguard useless; a typed `PC-07` matching the label on the machine keeps the safeguard real and gives the COE monitoring view (`LabServer.java:2744`) truthful data.
+3. **Login form — no field.** The student never types a computer number. `workstationService` generates the ID on first load and stores it in `localStorage`, and `studentAuthService.login()` sends it with the login. (An earlier version of this plan added an editable "Computer Number" field; it was removed, so the ID now identifies a browser profile rather than a labelled PC.)
 
 4. **Wire it through.** Add `workstationId: string` to `StudentLoginRequest` (`src/types/examination.ts:34`), include it in the payload sent from `useExamSession.tsx:510` / `studentAuthService.login()`.
 
-5. **Surface the 409 clearly.** When the API returns `WORKSTATION_IN_USE`, show the student the server's message (which names the occupying USN) plus "ask your invigilator" — not a generic failure toast.
+5. **Surface the 409 clearly.** When the API returns `WORKSTATION_IN_USE`, show the student the server's plain-English message ("Another candidate is still signed in on this computer. Ask your invigilator.", which does not name the other candidate) — not a generic failure toast.
 
-**Acceptance:** two different machines log in two different students concurrently and both reach the instructions page. A third browser deliberately sending a duplicate computer number still gets the 409.
+**Acceptance:** two different machines log in two different students concurrently and both reach the instructions page. A third client deliberately sending a `workstationId` already held by an active candidate still gets the 409.
 
 **Commit:** `Fix workstation ID collision causing 409 on concurrent student logins`
 
@@ -211,7 +211,7 @@ Funnel constraints to document: only ports 443 / 8443 / 10000, HTTPS must be ena
 Report results for each; do not mark a phase done on a passing build alone.
 
 1. Two machines, two students, concurrent login → both succeed (Phase 1).
-2. Duplicate computer number → `409 WORKSTATION_IN_USE` with a clear message (Phase 1).
+2. A `workstationId` already held by an active candidate → `409 WORKSTATION_IN_USE` with a plain-English message (Phase 1).
 3. Production build served over HTTPS → zero mixed-content errors, zero CORS preflights, no hardcoded IP in `dist/` (`grep` the bundle) (Phase 2).
 4. Boot the Node backend without `JWT_SECRET` → refuses to start (Phase 3).
 5. `GET /hod/dashboard` with a forged `x-hod-department-id` header and no token → 401 (Phase 3).

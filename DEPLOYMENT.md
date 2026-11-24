@@ -129,13 +129,13 @@ Before the students arrive:
 
 | What | Where it comes from | Who gets it | Notes |
 |---|---|---|---|
-| **Examination code** (looks like `EXAM-CS501-12`) | Shown by the COE portal and by the lab server's monitoring | Invigilators, so they can identify the sitting | **Students are not asked for it and nothing checks it.** The student login takes USN, date of birth and computer number only, so announcing the code does not restrict who can log in. A per-sitting exam code as a third login field is described in `TAILSCALE_HARDENING_PROMPT.md` (Phase 3, item 6) and is **not built**. |
+| **Examination code** (looks like `EXAM-CS501-12`) | Shown by the COE portal and by the lab server's monitoring | Invigilators, so they can identify the sitting | **Students are not asked for it and nothing checks it.** The student login takes USN and date of birth only, so announcing the code does not restrict who can log in. A per-sitting exam code as a third login field is described in `TAILSCALE_HARDENING_PROMPT.md` (Phase 3, item 6) and is **not built**. |
 | **Invigilator unlock password** | Generated per sitting in the COE portal (session unlock credential). It is shown **once**; only a salted verifier is synced to the lab server | The invigilator in each lab, in person or by a channel that is not the exam URL's | Typed by the invigilator on a student's screen after a security lock. Three wrong tries lock that student's session permanently until the Chief Invigilator overrides. If it is lost, generate a new one in the COE portal; the old one stops working. |
 | **Instructor login** (ID and password) | Created by `setup.ps1`; the password is shown once | The invigilators who may approve a student's re-login on another PC after a crash | Used from the "Invigilator sign-in" link on the student login page, at a PC the invigilator is standing at. |
 
 ### Student login is an open credential
 
-A student signs in with USN, date of birth and a computer number. USNs follow a pattern and dates of birth are known to
+A student signs in with USN and date of birth. USNs follow a pattern and dates of birth are known to
 classmates, so **neither is a secret**. Once the URL is public, anyone who learns a classmate's USN and date of birth
 can try to sign in as them from anywhere. What the system does about it:
 
@@ -145,7 +145,10 @@ can try to sign in as them from anywhere. What the system does about it:
   `429 RATE_LIMITED`. Behind Funnel the gateway also limits failed logins per client address when it can trust one
   (see "Gateway" below).
 - Login is allowed only from 30 minutes before the scheduled start.
-- One active candidate per computer number (`409 WORKSTATION_IN_USE`).
+- One active candidate per computer (`409 WORKSTATION_IN_USE`: "Another candidate is still signed in on this computer. Ask your
+  invigilator."). The student portal generates a machine ID on first load, keeps it in the browser's local storage and
+  sends it with the login; students never see or type it. It identifies a browser profile, so a second browser profile
+  or a private window on the same PC counts as a different computer, and the monitoring screens show IDs like `WS-1A2B3C4D`.
 
 What it does **not** do is prove that the person typing is the student. The invigilators in the room are the control:
 do not run an unsupervised sitting on this system.
@@ -259,7 +262,7 @@ if Funnel is still on, the portals are public again as soon as it finishes). The
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `409 WORKSTATION_IN_USE` at student login | That computer number is bound to another candidate whose session is still active. | Ask the invigilator. Pick a free computer number, have the other candidate submit (that frees the number), or use "Invigilator sign-in" to move a crashed session. |
+| `409 WORKSTATION_IN_USE` at student login ("Another candidate is still signed in on this computer") | The previous candidate on this PC (this browser profile) has not submitted. | Ask the invigilator. Have the other candidate submit (that frees the computer), or use "Invigilator sign-in" to move a crashed session. |
 | Blank white page, or the browser console says "mixed content" | The portal was built with an `http://` API address, which the browser refuses to call from an `https://` page. | The production build must be same-origin: `VITE_API_URL` and `VITE_LAB_API_BASE_URL` empty in the student portal's `.env.production`. Run `.\deploy\setup.ps1`, then `.\deploy\start-exam.ps1` (the gateway reads the portal when it starts). |
 | `502 LAB_SERVER_UNAVAILABLE` from the gateway (`504 GATEWAY_TIMEOUT` if it is slow) | The gateway is up but the lab server is not answering. | Read `CampusExam\lab_storage\logs\lab-server.err.log`, then stop and start again. |
 | The Tailscale command says Funnel is not enabled, or preflight says "not allowed to use Funnel" | The `funnel` node attribute or HTTPS is missing in the admin console. | Do the one-time admin-console steps above. |

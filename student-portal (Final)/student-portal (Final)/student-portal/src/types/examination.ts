@@ -34,7 +34,6 @@ export type LabConnectionState =
 export interface StudentLoginRequest {
   usn: string;
   dateOfBirth: string;
-  workstationId: string;
 }
 
 export interface StudentIdentity {

@@ -1406,7 +1406,7 @@ public final class LabServer {
                 Map<String, Object> boundSess = boundToken != null ? RuntimeState.studentSessions.get(boundToken) : null;
                 boolean isStillActive = boundSess != null && !Boolean.TRUE.equals(boundSess.get("submitted"));
                 if (isStillActive) {
-                    throw new LabException(409, "Workstation " + comp + " is currently in use by another active candidate (" + boundUsn + "). Please choose an available computer.", "WORKSTATION_IN_USE");
+                    throw new LabException(409, "Another candidate is still signed in on this computer. Ask your invigilator.", "WORKSTATION_IN_USE");
                 }
             }
             // Free any previous workstation bound to this student (e.g. if switching PCs before starting)

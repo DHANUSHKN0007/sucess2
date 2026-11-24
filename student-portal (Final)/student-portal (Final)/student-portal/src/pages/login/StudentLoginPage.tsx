@@ -13,8 +13,6 @@ import { API_MODE, LAB_API_BASE_URL } from '../../services/apiConfig';
 import {
   emergencyRecoveryService,
 } from '../../services/emergencyRecoveryService';
-import { workstationService } from '../../services/workstationService';
-import { ApiClientError } from '../../api/client';
 import { EmergencyRecoveryDashboard } from '../recovery/EmergencyRecoveryDashboard';
 import {
   INSTITUTION_NAME,
@@ -40,8 +38,6 @@ export const StudentLoginPage: React.FC = () => {
   const [dateOfBirth, setDateOfBirth] = useState<string>('');
   const [usnError, setUsnError] = useState<string | null>(null);
   const [dobError, setDobError] = useState<string | null>(null);
-  const [workstationId, setWorkstationId] = useState<string>(() => workstationService.getWorkstationId());
-  const [workstationError, setWorkstationError] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
@@ -92,13 +88,10 @@ export const StudentLoginPage: React.FC = () => {
     // 2. NORMAL STUDENT LOGIN
     const uErr = validateUsnInput(trimmedUsn);
     const dErr = validateDobInput(rawDob);
-    const normalizedWorkstationId = workstationId.trim().toUpperCase();
-    const wErr = normalizedWorkstationId ? null : 'Computer Number is required.';
     setUsnError(uErr);
     setDobError(dErr);
-    setWorkstationError(wErr);
 
-    if (uErr || dErr || wErr) {
+    if (uErr || dErr) {
       return;
     }
 
@@ -106,11 +99,9 @@ export const StudentLoginPage: React.FC = () => {
     try {
       const normalizedUsn = trimmedUsn.toUpperCase();
       const normalizedDob = normalizeDobInput(rawDob);
-      workstationService.setWorkstationId(normalizedWorkstationId);
       await loginStudent({
         usn: normalizedUsn,
         dateOfBirth: normalizedDob,
-        workstationId: normalizedWorkstationId,
       });
 
       // Check if student has an authorized recovery pending
@@ -121,10 +112,6 @@ export const StudentLoginPage: React.FC = () => {
         emergencyRecoveryService.consumeRecoveryAuthorisation(normalizedUsn, currentSysId);
       }
     } catch (err) {
-      if (err instanceof ApiClientError && err.code === 'WORKSTATION_IN_USE') {
-        setWorkstationError(`${err.message} Please ask your invigilator.`);
-        return;
-      }
       setAuthError(
         err instanceof Error
           ? err.message
@@ -307,41 +294,6 @@ export const StudentLoginPage: React.FC = () => {
               ) : (
                 <p className="mt-1.5 text-[12px] text-[#64748B]">
                   Select from calendar or type manually (YYYY-MM-DD)
-                </p>
-              )}
-            </div>
-
-            {/* Field 3: Computer Number (identifies this machine for the one-candidate-per-workstation check) */}
-            <div>
-              <label
-                htmlFor="student-workstation"
-                className="block text-[13px] font-semibold text-[#243B53] mb-1.5"
-              >
-                Computer Number <span className="text-[#B42318]">*</span>
-              </label>
-              <input
-                id="student-workstation"
-                type="text"
-                value={workstationId}
-                onChange={(e) => {
-                  setWorkstationId(e.target.value.toUpperCase());
-                  if (workstationError) setWorkstationError(null);
-                  if (authError) setAuthError(null);
-                }}
-                placeholder="e.g., PC-07"
-                autoComplete="off"
-                spellCheck={false}
-                className={`h-[43px] w-full px-3.5 rounded-[6px] border text-sm font-mono uppercase bg-white text-[#243247] placeholder-[#64748B] focus:outline-none focus:ring-2 focus:ring-[#2463B5] focus:border-[#2463B5] transition-colors duration-150 ${
-                  workstationError ? 'border-[#B42318]' : 'border-[#CBD5E1]'
-                }`}
-              />
-              {workstationError ? (
-                <p className="mt-1.5 text-xs text-[#B42318] font-medium" role="alert">
-                  {workstationError}
-                </p>
-              ) : (
-                <p className="mt-1.5 text-[12px] text-[#64748B]">
-                  Enter the number on the label of this computer
                 </p>
               )}
             </div>

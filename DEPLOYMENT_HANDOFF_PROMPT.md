@@ -90,7 +90,7 @@ Why: Funnel to `127.0.0.1:8082` directly would expose the **whole** lab server (
 ## Part D — Final verification (a stranger's dry run)
 
 1. `git clone` into a **fresh directory**; follow `DEPLOYMENT.md` literally, touching nothing from memory. Record every step where the doc was wrong or incomplete, fix the doc, repeat once.
-2. With the stack up through the gateway only: two machines, two students, concurrent login → both succeed; duplicate computer number → 409 with the clear message.
+2. With the stack up through the gateway only: two machines, two students, concurrent login → both succeed; a `workstationId` already held by an active candidate → 409 with the plain-English message.
 3. Forged time header, forged `Bearer INSTR-AUTH-x`, `POST /api/test/reset-submissions`, `GET /api/results/download` → all rejected or 404.
 4. Kill and restart the lab server mid-exam → sessions, answers and timers survive; report anything that does not.
 5. Start with `JWT_SECRET` unset, then with `LAB_TEST_MODE=true`, then with `dist/` missing → `start-exam` refuses each time with a readable message.
