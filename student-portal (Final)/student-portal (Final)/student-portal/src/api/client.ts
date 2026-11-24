@@ -51,6 +51,7 @@ export class ApiClientError extends Error {
 
 const ACTIVE_STUDENT_TOKEN_KEY = 'mitm_student_active_session_token_v1';
 const INSTRUCTOR_TOKEN_KEY = 'mitm_emgr_instructor_token_v1';
+const INSTRUCTOR_ROUTE = /^(?:https?:\/\/[^/]+)?\/api\/(?:instructor|recovery)(?:[/?]|$)/;
 
 export class ApiClient {
   private baseUrl: string;
@@ -140,6 +141,20 @@ export class ApiClient {
     }
   }
 
+  /**
+   * The token a request must carry: instructor and recovery routes use the instructor's token and every other route
+   * the student's. Taking whichever exists first sent a signed-in student's token to /api/recovery/* on a shared PC,
+   * which the lab server refused with 401.
+   */
+  private getTokenForUrl(url: string): string | null {
+    const key = INSTRUCTOR_ROUTE.test(url) ? INSTRUCTOR_TOKEN_KEY : ACTIVE_STUDENT_TOKEN_KEY;
+    try {
+      return sessionStorage.getItem(key) || localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
   public setStoredToken(token: string | null): void {
     if (typeof window === 'undefined') return null as unknown as void;
     try {
@@ -185,7 +200,7 @@ export class ApiClient {
     };
 
     // Attach Bearer token if not explicitly provided and available
-    const token = modifiedOptions.token !== undefined ? modifiedOptions.token : this.getStoredToken();
+    const token = modifiedOptions.token !== undefined ? modifiedOptions.token : this.getTokenForUrl(resolvedUrl);
     if (token) {
       (modifiedOptions.headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
     }
