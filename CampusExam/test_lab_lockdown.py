@@ -9,6 +9,7 @@ must then be disabled). Takes ~20 s because failed instructor logins slow later 
 """
 import json
 import os
+import statistics
 import sys
 import time
 import urllib.error
@@ -76,6 +77,20 @@ def main():
         for user, password in OLD_BUILT_IN_LOGINS:
             code, body = call("POST", "instructor/login", {"recoveryId": user, "recoveryKey": password})
             check(f"No instructor account configured: {user} refused", code == 503 and body.get("errorCode") == "INSTRUCTOR_LOGIN_NOT_CONFIGURED", f"HTTP {code}, {body.get('errorCode')}")
+
+    # An unknown USN and a wrong DOB are indistinguishable by body and comparable in time.
+    # Four wrong-DOB tries per USN stays under the per-USN lockout of five. Medians over 16
+    # samples, because single requests on a desktop host jitter by 10-25 ms either way.
+    unknown, wrong_dob, bodies = [], [], set()
+    for i in range(16):
+        for samples, usn, dob in [(unknown, f"4MH99ZZ{i:03d}", "2004-01-01"), (wrong_dob, f"4MH21CS00{6 + i % 4}", "1999-12-31")]:
+            started = time.perf_counter()
+            code, body = call("POST", "student/login", {"usn": usn, "dateOfBirth": dob, "workstationId": "LOCKDOWN-PC-99"})
+            samples.append((time.perf_counter() - started) * 1000)
+            bodies.add((code, body.get("errorCode"), body.get("error"), body.get("message")))
+    check("Unknown USN and wrong DOB give identical responses", len(bodies) == 1, f"{len(bodies)} distinct: {sorted(bodies)[0][:2]}")
+    gap = abs(statistics.median(unknown) - statistics.median(wrong_dob))
+    check("Unknown USN and wrong DOB take comparable time", gap < 25, f"median gap {gap:.1f} ms")
 
     # Staff routes refuse anything the gateway forwarded.
     code, body = call("GET", "monitoring/sessions", headers={"X-Gateway-Origin": "gateway"})

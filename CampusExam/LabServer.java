@@ -40,6 +40,8 @@ import java.util.zip.*;
 public final class LabServer {
 
     public static final SecureRandom RANDOM = new SecureRandom();
+    // One message for every student credential failure, so responses never reveal who is on a roster.
+    private static final String STUDENT_LOGIN_REJECTED = "Invalid credentials: Student USN or Date of Birth is incorrect, or student is not allocated to this scheduled examination sitting.";
     private static final long INSTRUCTOR_TOKEN_TTL_MS = 8L * 60 * 60 * 1000;
     // Instructor login stays disabled (503) unless both LAB_INSTRUCTOR_* variables are set and valid.
     private static String INSTRUCTOR_USERNAME;
@@ -1284,8 +1286,22 @@ public final class LabServer {
 
         if (candidateCohorts.isEmpty() || student == null) {
             recordLoginFailure(usn, now);
-            throw new LabException(401, "Invalid credentials: Student USN (" + usn + ") or Date of Birth is incorrect, or student is not allocated to any scheduled examination sitting in this laboratory.", "INVALID_CREDENTIALS");
+            throw new LabException(401, STUDENT_LOGIN_REJECTED, "INVALID_CREDENTIALS");
         }
+
+        // 3. Verify DOB before anything that reveals roster membership (e.g. the ambiguity check below)
+        String expectedDob = String.valueOf(student.get("dob"));
+        String normDob = normalizeDateString(dob);
+        String normExpected = normalizeDateString(expectedDob);
+        boolean validAuth = normExpected.equals(normDob) || expectedDob.equals(dob) || dob.replace("-", "").equals(expectedDob.replace("-", ""));
+        if (!validAuth) {
+            recordLoginFailure(usn, now);
+            throw new LabException(401, STUDENT_LOGIN_REJECTED, "INVALID_CREDENTIALS");
+        }
+
+        // Clear failures on successful credential verification
+        RuntimeState.loginFailureCounts.remove(usn);
+        RuntimeState.loginLockoutUntil.remove(usn);
 
         // Decision 4: Ambiguity check - reject if student matches multiple simultaneously active cohorts
         if (candidateCohorts.size() > 1) {
@@ -1303,20 +1319,6 @@ public final class LabServer {
         CohortState targetCohort = candidateCohorts.get(0);
         long candExamId = targetCohort.examinationId;
         Map<String, Object> targetMeta = targetCohort.sessionMetadata;
-
-        // 3. Verify DOB (Without logging plaintext DOB, generic error message to avoid disclosure)
-        String expectedDob = String.valueOf(student.get("dob"));
-        String normDob = normalizeDateString(dob);
-        String normExpected = normalizeDateString(expectedDob);
-        boolean validAuth = normExpected.equals(normDob) || expectedDob.equals(dob) || dob.replace("-", "").equals(expectedDob.replace("-", ""));
-        if (!validAuth) {
-            recordLoginFailure(usn, now);
-            throw new LabException(401, "Invalid credentials: Student USN or Date of Birth is incorrect, or student is not allocated to this scheduled examination sitting.", "INVALID_CREDENTIALS");
-        }
-
-        // Clear failures on successful credential verification
-        RuntimeState.loginFailureCounts.remove(usn);
-        RuntimeState.loginLockoutUntil.remove(usn);
 
         // Determine candidate's sitting and session metadata from the resolved cohort
         String examDate = String.valueOf(targetMeta.getOrDefault("examDate", targetMeta.getOrDefault("scheduledDate", LocalDate.now().toString())));
@@ -1342,7 +1344,7 @@ public final class LabServer {
             String reqSit = String.valueOf(form.getOrDefault("sitting", form.getOrDefault("sittingName", form.get("sittingCode")))).trim().toUpperCase(Locale.ROOT);
             if (!reqSit.isEmpty() && !reqSit.contains(sittingName.toUpperCase(Locale.ROOT)) && !sittingName.toUpperCase(Locale.ROOT).contains(reqSit)) {
                 recordLoginFailure(usn, now);
-                throw new LabException(401, "Invalid credentials: Student USN or Date of Birth is incorrect, or student is not allocated to this scheduled examination sitting.", "INVALID_CREDENTIALS");
+                throw new LabException(401, STUDENT_LOGIN_REJECTED, "INVALID_CREDENTIALS");
             }
         }
 
