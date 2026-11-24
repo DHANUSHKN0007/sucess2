@@ -122,3 +122,12 @@ address. With a trusted address the gateway sets `X-Gateway-Client` to it (repla
 the client sent), refuses a client's 21st failed login in a minute with 429, and the lab
 server adds the address to its login limiter keys. With none, the gateway sends no
 `X-Gateway-Client` and the lab server's own limits apply.
+
+### Point Tailscale at the gateway port only
+
+`tailscale serve` or `tailscale funnel` must target the gateway port (`GATEWAY_PORT`, default 3002) and never
+the lab server's 8082. Tailscale forwards from this host, so a tunnel aimed at 8082 reaches the lab server as a
+loopback caller with no `X-Gateway-Origin` header, and `requireLocalStaff` treats it as local: the LOCAL STAFF
+routes (`results/download`, `monitoring/*`, `labs/*`, ...) would be open to the internet. Only the gateway adds
+`X-Gateway-Origin` and limits `/api` to the allowlist above. The exact `tailscale` flags are to be verified on the
+target machine with `tailscale funnel --help`.
