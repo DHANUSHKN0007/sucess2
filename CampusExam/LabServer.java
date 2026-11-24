@@ -3162,6 +3162,13 @@ public final class LabServer {
             throw new LabException(404, "No active recovery authorization found for USN " + usn, "TOKEN_NOT_FOUND");
         }
 
+        // The tokenId is this route's only credential, so check it before revealing the token's state. Every
+        // rejection happens before the token is marked used: a refused consume must leave it usable.
+        if (!MessageDigest.isEqual(reqToken.getBytes(StandardCharsets.UTF_8),
+                String.valueOf(token.get("tokenId")).getBytes(StandardCharsets.UTF_8))) {
+            throw new LabException(403, "Recovery token is required and must match the approved token", "INVALID_TOKEN");
+        }
+
         if (Boolean.TRUE.equals(token.get("isOneTimeUsed"))) {
             throw new LabException(403, "Recovery authorization token has already been consumed (one-time use only)", "TOKEN_ALREADY_USED");
         }
@@ -3170,10 +3177,6 @@ public final class LabServer {
         long exp = parseLongSafe(token.get("expiresAtMs"));
         if (now > exp) {
             throw new LabException(403, "Recovery authorization token has expired", "TOKEN_EXPIRED");
-        }
-
-        if (!reqToken.isEmpty() && !reqToken.equals(token.get("tokenId"))) {
-            throw new LabException(403, "Recovery token mismatch", "INVALID_TOKEN");
         }
 
         token.put("isOneTimeUsed", true);

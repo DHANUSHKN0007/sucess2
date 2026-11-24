@@ -59,7 +59,7 @@ would pass the locality check.
 | `student/login`, `instructor/login` | They issue the credential. |
 | `instructor/logout` | It can only revoke the token it is given. |
 | LOCAL STAFF routes (above) | Called by the COE portal, which sends the central JWT the lab server cannot verify, and, for `monitoring/sessions` only, by `CampusExam.java` (`fetchLabServerTelemetry`), which sends no auth header. No central→lab credential exists yet. Until one does, these are safe only from the lab server host itself. A COE browser or central server on another machine gets 403 unless `LAB_STAFF_ALLOW_REMOTE=true`, which re-opens them to anyone who can reach port 8082. |
-| `recovery/relogin-authorisations/consume` | The student is on a replacement PC with no session. The route works only for a USN an instructor approved in the last 10 minutes. The one-time `recoveryToken` is checked only if sent, and the student portal does not send it. |
+| `recovery/relogin-authorisations/consume` | The student is on a replacement PC with no session. The route works only for a USN an instructor approved in the last 10 minutes, and the request must carry that approval's one-time `recoveryToken`. A refused request does not use the token up. The student portal does not send the token, so its consume call is refused and it falls back to its local path. |
 | `security/unlock`, `…/verify-unlock` | The credential is the invigilator's unlock password in the body, not a token. |
 | SYSTEM routes | No transport credential; the signed payload is the credential. |
 
